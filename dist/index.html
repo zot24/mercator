@@ -8,6 +8,7 @@
     <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&display=swap" rel="stylesheet"/>
     <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet"/>
     <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap" rel="stylesheet"/>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
     <script>
       tailwind.config = {
         darkMode: "class",
@@ -171,7 +172,7 @@
 
 <!-- Main Content -->
 <main class="ml-48 mt-10 p-4 overflow-y-auto h-[calc(100vh-2.5rem-1.5rem)] custom-scrollbar pb-12">
-    <!-- Search Bar -->
+    <!-- Search + View Toggle -->
     <div class="flex items-center justify-between gap-4 mb-4">
         <div class="relative flex-1 max-w-2xl">
             <div class="absolute inset-y-0 left-3 flex items-center pointer-events-none">
@@ -184,10 +185,27 @@
                 <span class="mono text-[9px] text-outline px-1.5 py-0.5 border border-outline-variant rounded bg-surface-variant">/</span>
             </div>
         </div>
+        <div class="flex gap-px bg-outline-variant border border-outline-variant p-px rounded-sm">
+            <button id="view-list" onclick="setView('list')" class="px-3 py-1 text-[10px] mono font-medium bg-surface-variant text-on-surface">LIST</button>
+            <button id="view-graph" onclick="setView('graph')" class="px-3 py-1 text-[10px] mono font-medium bg-surface-dim text-on-surface-variant hover:text-on-surface">GRAPH</button>
+        </div>
     </div>
 
     <!-- Project List -->
     <div id="map" class="flex flex-col gap-[2px]"></div>
+
+    <!-- Graph View -->
+    <div id="graph-container" class="hidden" style="width:100%; height: calc(100vh - 8rem);">
+        <svg id="graph-svg" width="100%" height="100%"></svg>
+    </div>
+
+    <!-- Graph Tooltip -->
+    <div id="graph-tooltip" class="fixed hidden bg-surface-dim border border-outline-variant p-3 z-[999] max-w-xs pointer-events-none" style="backdrop-filter: blur(10px);">
+        <div class="mono text-[11px] font-bold text-on-surface mb-1" id="tooltip-name"></div>
+        <div class="mono text-[9px] text-on-surface-variant mb-1" id="tooltip-type"></div>
+        <div class="mono text-[9px] text-on-surface-variant truncate" id="tooltip-desc"></div>
+        <div class="mono text-[9px] text-primary mt-1" id="tooltip-tags"></div>
+    </div>
 </main>
 
 <!-- Footer -->
@@ -522,12 +540,17 @@
             link.classList.remove('text-on-surface-variant');
             currentFilter = link.dataset.filter;
             renderProjects();
+            if (currentView === 'graph' && graphData) renderGraph(graphData);
         });
     });
 
-    document.getElementById('search').addEventListener('input', renderProjects);
+    function onFilterChange() {
+        renderProjects();
+        if (currentView === 'graph' && graphData) renderGraph(graphData);
+    }
+    document.getElementById('search').addEventListener('input', onFilterChange);
     document.getElementById('sort').addEventListener('change', renderProjects);
-    document.getElementById('tech-filter').addEventListener('change', renderProjects);
+    document.getElementById('tech-filter').addEventListener('change', onFilterChange);
     document.getElementById('settings-modal').addEventListener('click', e => { if (e.target === e.currentTarget) closeSettings(); });
 
     // Keyboard shortcut: / to focus search
@@ -537,6 +560,198 @@
             document.getElementById('search').focus();
         }
     });
+
+    // View toggle
+    let currentView = 'list';
+    let graphData = null;
+    let simulation = null;
+
+    function setView(view) {
+        currentView = view;
+        document.getElementById('view-list').className = `px-3 py-1 text-[10px] mono font-medium ${view === 'list' ? 'bg-surface-variant text-on-surface' : 'bg-surface-dim text-on-surface-variant hover:text-on-surface'}`;
+        document.getElementById('view-graph').className = `px-3 py-1 text-[10px] mono font-medium ${view === 'graph' ? 'bg-surface-variant text-on-surface' : 'bg-surface-dim text-on-surface-variant hover:text-on-surface'}`;
+        document.getElementById('map').classList.toggle('hidden', view === 'graph');
+        document.getElementById('graph-container').classList.toggle('hidden', view === 'list');
+        if (view === 'graph' && !graphData) {
+            loadGraph();
+        } else if (view === 'graph' && graphData) {
+            renderGraph(graphData);
+        }
+    }
+
+    const nodeColorMap = {
+        'Git': '#58a6ff',
+        'GitHub': '#bc8cff',
+        'GitLab': '#bc8cff',
+        'Idea': '#3fb950',
+        'Folder': '#484f58',
+        'Obsidian': '#a88bfa',
+    };
+
+    function loadGraph() {
+        fetch('/api/graph')
+            .then(r => r.json())
+            .then(data => {
+                graphData = data;
+                renderGraph(data);
+            });
+    }
+
+    function renderGraph(data) {
+        const container = document.getElementById('graph-container');
+        const svg = d3.select('#graph-svg');
+        svg.selectAll('*').remove();
+
+        const width = container.clientWidth;
+        const height = container.clientHeight;
+
+        svg.attr('viewBox', [0, 0, width, height]);
+
+        // Apply current filter
+        const searchTerm = document.getElementById('search').value.toLowerCase();
+        const techFilter = document.getElementById('tech-filter').value;
+
+        const visibleIds = new Set();
+        data.nodes.forEach(n => {
+            const matchesSearch = !searchTerm || n.name.toLowerCase().includes(searchTerm) || (n.description || '').toLowerCase().includes(searchTerm);
+            let matchesFilter = currentFilter === 'all' || n.type === currentFilter;
+            if (currentFilter === 'dirty') return; // skip dirty filter for graph
+            const matchesTech = !techFilter || (n.tech && n.tech.includes(techFilter));
+            if (matchesSearch && matchesFilter && matchesTech) visibleIds.add(n.id);
+        });
+
+        const nodes = data.nodes.filter(n => visibleIds.has(n.id));
+        const nodeIdSet = new Set(nodes.map(n => n.id));
+        const edges = data.edges.filter(e => nodeIdSet.has(e.source) && nodeIdSet.has(e.target) || nodeIdSet.has(e.source?.id) && nodeIdSet.has(e.target?.id));
+
+        // Count connections per node
+        const connCount = {};
+        edges.forEach(e => {
+            const s = typeof e.source === 'object' ? e.source.id : e.source;
+            const t = typeof e.target === 'object' ? e.target.id : e.target;
+            connCount[s] = (connCount[s] || 0) + 1;
+            connCount[t] = (connCount[t] || 0) + 1;
+        });
+
+        // Stop existing simulation
+        if (simulation) simulation.stop();
+
+        simulation = d3.forceSimulation(nodes)
+            .force('link', d3.forceLink(edges).id(d => d.id).distance(80).strength(d => Math.min(d.weight / 10, 0.3)))
+            .force('charge', d3.forceManyBody().strength(-120))
+            .force('center', d3.forceCenter(width / 2, height / 2))
+            .force('collision', d3.forceCollide().radius(d => Math.max(4, Math.sqrt(connCount[d.id] || 0)) * 2 + 8));
+
+        const g = svg.append('g');
+
+        // Zoom
+        svg.call(d3.zoom().scaleExtent([0.2, 5]).on('zoom', (event) => {
+            g.attr('transform', event.transform);
+        }));
+
+        // Edges
+        const link = g.append('g')
+            .selectAll('line')
+            .data(edges)
+            .join('line')
+            .attr('stroke', '#30363d')
+            .attr('stroke-opacity', 0.4)
+            .attr('stroke-width', d => Math.min(d.weight / 3, 2));
+
+        // Nodes
+        const node = g.append('g')
+            .selectAll('circle')
+            .data(nodes)
+            .join('circle')
+            .attr('r', d => Math.max(4, Math.sqrt(connCount[d.id] || 0)) * 2 + 3)
+            .attr('fill', d => nodeColorMap[d.type] || '#484f58')
+            .attr('stroke', '#0d1117')
+            .attr('stroke-width', 1)
+            .style('cursor', 'pointer')
+            .call(d3.drag()
+                .on('start', (event, d) => {
+                    if (!event.active) simulation.alphaTarget(0.3).restart();
+                    d.fx = d.x; d.fy = d.y;
+                })
+                .on('drag', (event, d) => { d.fx = event.x; d.fy = event.y; })
+                .on('end', (event, d) => {
+                    if (!event.active) simulation.alphaTarget(0);
+                    d.fx = null; d.fy = null;
+                })
+            );
+
+        // Labels for highly connected nodes
+        const label = g.append('g')
+            .selectAll('text')
+            .data(nodes.filter(d => (connCount[d.id] || 0) > 20))
+            .join('text')
+            .text(d => d.name.toUpperCase())
+            .attr('font-family', 'JetBrains Mono, monospace')
+            .attr('font-size', '8px')
+            .attr('fill', '#8b949e')
+            .attr('text-anchor', 'middle')
+            .attr('dy', d => -(Math.max(4, Math.sqrt(connCount[d.id] || 0)) * 2 + 8));
+
+        // Tooltip
+        const tooltip = document.getElementById('graph-tooltip');
+        const tooltipName = document.getElementById('tooltip-name');
+        const tooltipType = document.getElementById('tooltip-type');
+        const tooltipDesc = document.getElementById('tooltip-desc');
+        const tooltipTags = document.getElementById('tooltip-tags');
+
+        node.on('mouseover', (event, d) => {
+            tooltip.classList.remove('hidden');
+            tooltipName.textContent = d.name.toUpperCase();
+            tooltipType.textContent = `${d.type} | ${(connCount[d.id] || 0)} connections`;
+            tooltipDesc.textContent = d.description || '';
+            tooltipTags.textContent = (d.tags || []).join(' · ');
+            tooltip.style.left = (event.pageX + 15) + 'px';
+            tooltip.style.top = (event.pageY - 10) + 'px';
+            // Highlight connected
+            const connectedIds = new Set();
+            edges.forEach(e => {
+                const s = typeof e.source === 'object' ? e.source.id : e.source;
+                const t = typeof e.target === 'object' ? e.target.id : e.target;
+                if (s === d.id) connectedIds.add(t);
+                if (t === d.id) connectedIds.add(s);
+            });
+            node.attr('opacity', n => connectedIds.has(n.id) || n.id === d.id ? 1 : 0.15);
+            link.attr('stroke-opacity', e => {
+                const s = typeof e.source === 'object' ? e.source.id : e.source;
+                const t = typeof e.target === 'object' ? e.target.id : e.target;
+                return (s === d.id || t === d.id) ? 0.8 : 0.05;
+            });
+            label.attr('opacity', n => connectedIds.has(n.id) || n.id === d.id ? 1 : 0.15);
+        })
+        .on('mousemove', (event) => {
+            tooltip.style.left = (event.pageX + 15) + 'px';
+            tooltip.style.top = (event.pageY - 10) + 'px';
+        })
+        .on('mouseout', () => {
+            tooltip.classList.add('hidden');
+            node.attr('opacity', 1);
+            link.attr('stroke-opacity', 0.4);
+            label.attr('opacity', 1);
+        })
+        .on('click', (event, d) => {
+            // Open project
+            if (d.type === 'Obsidian' && d.obsidianUrl) {
+                window.location.href = d.obsidianUrl;
+            } else if (['Git', 'Folder', 'Idea'].includes(d.type)) {
+                window.location.href = 'vscode://file/' + encodeURIComponent(d.path);
+            } else {
+                window.open(d.path, '_blank');
+            }
+        });
+
+        simulation.on('tick', () => {
+            link
+                .attr('x1', d => d.source.x).attr('y1', d => d.source.y)
+                .attr('x2', d => d.target.x).attr('y2', d => d.target.y);
+            node.attr('cx', d => d.x).attr('cy', d => d.y);
+            label.attr('x', d => d.x).attr('y', d => d.y);
+        });
+    }
 
     // Load data
     fetch('/api/map')

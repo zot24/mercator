@@ -102,6 +102,9 @@ struct Project {
     /// Relative path to the Obsidian note within the vault
     #[serde(rename = "obsidianNotePath", default, skip_serializing_if = "Option::is_none")]
     obsidian_note_path: Option<String>,
+    /// Auto-generated topic tags for graph edges and semantic grouping
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    tags: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -184,6 +187,7 @@ async fn fetch_github_repos(username: &str) -> Vec<Project> {
                         agent_used: None,
                         obsidian_url: None,
                         obsidian_note_path: None,
+                        tags: vec![],
                     });
                 }
             }
@@ -257,6 +261,7 @@ async fn fetch_gitlab_repos(username: &str) -> Vec<Project> {
                         agent_used: None,
                         obsidian_url: None,
                         obsidian_note_path: None,
+                        tags: vec![],
                     });
                 }
             }
@@ -422,6 +427,7 @@ fn survey_projects(root: &Path) -> Vec<Project> {
                     agent_used,
                     obsidian_url: None,
                     obsidian_note_path: None,
+                    tags: vec![],
                 });
 
                 it.skip_current_dir();
@@ -440,6 +446,7 @@ fn survey_projects(root: &Path) -> Vec<Project> {
                     agent_used: detect_agent(path),
                     obsidian_url: None,
                     obsidian_note_path: None,
+                    tags: vec![],
                 });
             }
         }
@@ -715,6 +722,7 @@ fn scan_obsidian_vault(vault_path: &Path, folder: &str, vault_name: &str) -> Vec
                 agent_used: None,
                 obsidian_url: Some(obsidian_url),
                 obsidian_note_path: Some(relative),
+                tags: vec![],
             });
         } else if name.ends_with(".md") {
             if name == "@Projects.md" {
@@ -741,6 +749,7 @@ fn scan_obsidian_vault(vault_path: &Path, folder: &str, vault_name: &str) -> Vec
                                 agent_used: None,
                                 obsidian_url: Some(obsidian_url),
                                 obsidian_note_path: Some(relative.clone()),
+                                tags: vec![],
                             });
                         }
                     }
@@ -770,6 +779,7 @@ fn scan_obsidian_vault(vault_path: &Path, folder: &str, vault_name: &str) -> Vec
                     agent_used: None,
                     obsidian_url: Some(obsidian_url),
                     obsidian_note_path: Some(relative),
+                    tags: vec![],
                 });
             }
         }
@@ -847,6 +857,116 @@ async fn get_git_status_api(
     }
 }
 
+/// Auto-tag projects based on name, description, and tech stack
+fn auto_tag_projects(projects: &mut [Project]) {
+    let tag_keywords: &[(&str, &[&str])] = &[
+        ("ai", &["ai", "llm", "gpt", "claude", "codex", "agent", "neural", "ml", "machine learning", "openai", "anthropic", "pytorch", "tensorflow"]),
+        ("web", &["website", "landing", "frontend", "react", "next", "svelte", "html", "css", "tailwind", "vue", "angular", "sveltekit"]),
+        ("api", &["api", "rest", "graphql", "endpoint", "server", "express", "axum", "hono", "fastapi"]),
+        ("cli", &["cli", "terminal", "command line", "command-line", "shell", "bash"]),
+        ("devops", &["docker", "kubernetes", "k8s", "ci/cd", "deploy", "infra", "terraform", "ansible", "helm", "umbrel"]),
+        ("mobile", &["ios", "android", "mobile", "swift", "kotlin", "react native", "flutter"]),
+        ("data", &["database", "postgres", "sqlite", "redis", "mongo", "data", "analytics", "scraping", "crawler"]),
+        ("blockchain", &["blockchain", "web3", "solana", "ethereum", "crypto", "token", "nft", "rwa", "smart contract"]),
+        ("seo", &["seo", "search engine", "sitemap", "analytics", "tracking"]),
+        ("auth", &["auth", "login", "oauth", "jwt", "session", "credential", "password"]),
+        ("bot", &["bot", "telegram", "whatsapp", "discord", "slack", "chat", "messaging"]),
+        ("automation", &["automat", "workflow", "cron", "schedule", "scrape", "crawl", "hook"]),
+        ("game", &["game", "rpg", "player", "level", "score"]),
+        ("docs", &["documentation", "readme", "wiki", "knowledge", "obsidian", "note"]),
+        ("finance", &["tax", "invoice", "payment", "billing", "finance", "accounting", "portfolio"]),
+    ];
+
+    for project in projects.iter_mut() {
+        let haystack = format!(
+            "{} {} {} {}",
+            project.name.to_lowercase(),
+            project.description.to_lowercase(),
+            project.tech_stack.join(" ").to_lowercase(),
+            project.agent_used.as_deref().unwrap_or(""),
+        );
+
+        let mut tags = Vec::new();
+        for (tag, keywords) in tag_keywords {
+            if keywords.iter().any(|kw| haystack.contains(kw)) {
+                tags.push(tag.to_string());
+            }
+        }
+        project.tags = tags;
+    }
+}
+
+/// Compute a relationship graph from projects
+fn compute_graph(projects: &[Project]) -> serde_json::Value {
+    let mut nodes = Vec::new();
+    let mut edges = Vec::new();
+
+    // Build nodes
+    for (i, p) in projects.iter().enumerate() {
+        nodes.push(serde_json::json!({
+            "id": i,
+            "name": p.name,
+            "type": p.project_type,
+            "tags": p.tags,
+            "tech": p.tech_stack,
+            "description": p.description,
+            "agent": p.agent_used,
+            "path": p.path,
+            "obsidianUrl": p.obsidian_url,
+        }));
+    }
+
+    // Build edges: shared tags + shared tech
+    for i in 0..projects.len() {
+        for j in (i + 1)..projects.len() {
+            let mut weight: f32 = 0.0;
+            let mut shared = Vec::new();
+
+            // Shared tags (strong signal)
+            for tag in &projects[i].tags {
+                if projects[j].tags.contains(tag) {
+                    weight += 2.0;
+                    shared.push(tag.clone());
+                }
+            }
+
+            // Shared tech stack
+            for tech in &projects[i].tech_stack {
+                if projects[j].tech_stack.contains(tech) {
+                    weight += 1.0;
+                    if !shared.contains(tech) {
+                        shared.push(tech.clone());
+                    }
+                }
+            }
+
+            // Same agent
+            if let (Some(a), Some(b)) = (&projects[i].agent_used, &projects[j].agent_used) {
+                if a == b {
+                    weight += 0.5;
+                }
+            }
+
+            // Obsidian link (explicit connection)
+            if projects[i].obsidian_url.is_some() && projects[j].obsidian_url.is_some() {
+                weight += 1.0;
+            }
+
+            // Only include edges with meaningful weight
+            if weight >= 2.0 {
+                edges.push(serde_json::json!({
+                    "source": i,
+                    "target": j,
+                    "weight": weight,
+                    "shared": shared,
+                }));
+            }
+        }
+    }
+
+    serde_json::json!({ "nodes": nodes, "edges": edges })
+}
+
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
@@ -895,8 +1015,11 @@ async fn main() {
 
                 let before_dedup = all_projects.len();
                 let all_projects = deduplicate_projects(all_projects);
-                let all_projects = link_obsidian_notes(all_projects);
+                let mut all_projects = link_obsidian_notes(all_projects);
                 let merged = before_dedup - all_projects.len();
+
+                // Auto-tag all projects
+                auto_tag_projects(&mut all_projects);
 
                 if let Err(e) = save_map(&all_projects, &output) {
                     eprintln!("Error: {}", e);
@@ -937,8 +1060,20 @@ async fn main() {
                 }
             };
 
+            let graph_path = map_file.clone();
+            let serve_graph = move || {
+                let path = graph_path.clone();
+                async move {
+                    match load_map(&path) {
+                        Ok(projects) => Json(compute_graph(&projects)),
+                        Err(_) => Json(serde_json::json!({ "nodes": [], "edges": [] })),
+                    }
+                }
+            };
+
             let app = Router::new()
                 .route("/api/map", get(serve_map))
+                .route("/api/graph", get(serve_graph))
                 .route("/api/open-terminal", post(open_terminal))
                 .route("/api/git-status", get(get_git_status_api))
                 .fallback_service(ServeDir::new("dist"));
