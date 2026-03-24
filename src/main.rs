@@ -692,16 +692,25 @@ fn scan_obsidian_vault(vault_path: &Path, folder: &str, vault_name: &str) -> Vec
 
         if entry_path.is_dir() {
             // Subfolder = project. Read first .md inside for description.
-            let description = std::fs::read_dir(&entry_path).ok()
+            let md_file = std::fs::read_dir(&entry_path).ok()
                 .and_then(|entries| {
                     entries.flatten()
                         .filter(|e| e.path().extension().map(|ext| ext == "md").unwrap_or(false))
                         .next()
-                })
+                });
+            let description = md_file.as_ref()
                 .map(|md| read_md_description(&md.path()))
                 .unwrap_or_else(|| "Obsidian project folder".to_string());
 
-            let relative = format!("{}/{}", folder, name);
+            // Obsidian URI needs the file path without the final .md extension
+            let relative = if let Some(ref md) = md_file {
+                let md_name = md.file_name().to_string_lossy().into_owned();
+                // Strip only the last .md (Obsidian strips one .md itself)
+                let note_name = md_name.strip_suffix(".md").unwrap_or(&md_name);
+                format!("{}/{}/{}", folder, name, note_name)
+            } else {
+                format!("{}/{}", folder, name)
+            };
             let obsidian_url = format!("obsidian://open?vault={}&file={}", percent_encode(vault_name), percent_encode(&relative));
 
             let last_modified = entry.metadata().ok()
@@ -733,7 +742,7 @@ fn scan_obsidian_vault(vault_path: &Path, folder: &str, vault_name: &str) -> Vec
                         if let Some(idea) = line.strip_prefix("- ") {
                             let idea = idea.trim();
                             if idea.is_empty() { continue; }
-                            let relative = format!("{}/{}", folder, name);
+                            let relative = format!("{}/{}", folder, "@Projects");
                             let obsidian_url = format!("obsidian://open?vault={}&file={}", percent_encode(vault_name), percent_encode(&relative));
                             projects.push(Project {
                                 name: idea.to_string(),
@@ -896,10 +905,36 @@ fn auto_tag_projects(projects: &mut [Project]) {
     }
 }
 
-/// Compute a relationship graph from projects
+/// Extract significant keywords from a description for domain matching
+fn domain_keywords(text: &str) -> Vec<String> {
+    let stopwords = ["the", "and", "for", "with", "from", "that", "this", "are", "was", "not",
+        "you", "your", "has", "have", "had", "but", "all", "can", "will", "one", "our",
+        "out", "use", "how", "its", "let", "may", "who", "did", "get", "she", "her",
+        "him", "his", "old", "new", "now", "way", "each", "make", "like", "just",
+        "over", "such", "take", "than", "them", "very", "when", "what", "some", "into",
+        "been", "more", "other", "which", "about", "would", "their", "these", "could",
+        "project", "using", "based", "built", "also", "here", "https", "http", "www",
+        "com", "org", "github", "description", "provided", "none", "file", "code"];
+    let lower = text.to_lowercase();
+    lower.split(|c: char| !c.is_alphanumeric())
+        .filter(|w| w.len() >= 4 && !stopwords.contains(w))
+        .map(|w| w.to_string())
+        .collect::<std::collections::HashSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+/// Compute a relationship graph from projects based on goals and usage, not just tech
 fn compute_graph(projects: &[Project]) -> serde_json::Value {
     let mut nodes = Vec::new();
     let mut edges = Vec::new();
+
+    // Pre-compute per-project data
+    let keywords: Vec<Vec<String>> = projects.iter().map(|p| {
+        // Cap description to 200 chars to avoid noisy long descriptions
+        let desc_cap: String = p.description.chars().take(200).collect();
+        domain_keywords(&format!("{} {}", p.name, desc_cap))
+    }).collect();
 
     // Build nodes
     for (i, p) in projects.iter().enumerate() {
@@ -916,49 +951,63 @@ fn compute_graph(projects: &[Project]) -> serde_json::Value {
         }));
     }
 
-    // Build edges: shared tags + shared tech
     for i in 0..projects.len() {
         for j in (i + 1)..projects.len() {
             let mut weight: f32 = 0.0;
-            let mut shared = Vec::new();
+            let mut reasons = Vec::new();
 
-            // Shared tags (strong signal)
-            for tag in &projects[i].tags {
-                if projects[j].tags.contains(tag) {
-                    weight += 2.0;
-                    shared.push(tag.clone());
+            // 1. One project name appears in the other's description (usage/dependency)
+            let ni = projects[i].name.to_lowercase();
+            let nj = projects[j].name.to_lowercase();
+            let di = projects[i].description.to_lowercase();
+            let dj = projects[j].description.to_lowercase();
+            if ni.len() >= 4 && dj.contains(&ni) {
+                weight += 6.0;
+                reasons.push(format!("{} mentioned in {}", projects[i].name, projects[j].name));
+            }
+            if nj.len() >= 4 && di.contains(&nj) {
+                weight += 6.0;
+                reasons.push(format!("{} mentioned in {}", projects[j].name, projects[i].name));
+            }
+
+            // 3. Shared domain keywords from descriptions (goal similarity)
+            let shared_kw: Vec<&String> = keywords[i].iter()
+                .filter(|kw| keywords[j].contains(kw))
+                .collect();
+            let kw_score = (shared_kw.len() as f32).min(5.0);
+            if kw_score >= 3.0 {
+                weight += kw_score;
+                reasons.push(format!("shared: {}", shared_kw.iter().take(3).map(|s| s.as_str()).collect::<Vec<_>>().join(", ")));
+            }
+
+            // 4. Shared tags — only count if there's already another signal
+            //    (prevents generic tag-only connections like "both tagged ai")
+            let shared_tags: Vec<&String> = projects[i].tags.iter()
+                .filter(|t| projects[j].tags.contains(t))
+                .collect();
+            if !shared_tags.is_empty() && weight > 0.0 {
+                weight += shared_tags.len() as f32;
+                reasons.push(format!("tags: {}", shared_tags.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")));
+            }
+
+            // 5. Obsidian idea linked to implementation
+            if (matches!(projects[i].project_type, ProjectType::Obsidian) && !matches!(projects[j].project_type, ProjectType::Obsidian))
+                || (!matches!(projects[i].project_type, ProjectType::Obsidian) && matches!(projects[j].project_type, ProjectType::Obsidian))
+            {
+                // Already linked via name matching — check if remaining connection exists
+                if weight > 0.0 {
+                    weight += 3.0;
+                    reasons.push("idea→impl".to_string());
                 }
             }
 
-            // Shared tech stack
-            for tech in &projects[i].tech_stack {
-                if projects[j].tech_stack.contains(tech) {
-                    weight += 1.0;
-                    if !shared.contains(tech) {
-                        shared.push(tech.clone());
-                    }
-                }
-            }
-
-            // Same agent
-            if let (Some(a), Some(b)) = (&projects[i].agent_used, &projects[j].agent_used) {
-                if a == b {
-                    weight += 0.5;
-                }
-            }
-
-            // Obsidian link (explicit connection)
-            if projects[i].obsidian_url.is_some() && projects[j].obsidian_url.is_some() {
-                weight += 1.0;
-            }
-
-            // Only include edges with meaningful weight
-            if weight >= 2.0 {
+            // Only include meaningful connections
+            if weight >= 4.0 {
                 edges.push(serde_json::json!({
                     "source": i,
                     "target": j,
                     "weight": weight,
-                    "shared": shared,
+                    "shared": reasons,
                 }));
             }
         }

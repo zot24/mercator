@@ -66,7 +66,7 @@
         <nav class="hidden md:flex gap-4 items-center">
             <span class="mono text-[10px] text-on-surface-variant uppercase">PROJECTS: <span id="total-count" class="text-on-surface">0</span></span>
             <div class="h-3 w-px bg-outline-variant"></div>
-            <span class="mono text-[10px] text-on-surface-variant uppercase">DIRTY: <span id="count-dirty" class="text-error">0</span></span>
+            <span class="mono text-[10px] text-on-surface-variant uppercase cursor-help" title="Dirty = uncommitted changes in the git working tree (modified, added, or untracked files)">DIRTY: <span id="count-dirty" class="text-error">0</span></span>
             <div class="h-3 w-px bg-outline-variant"></div>
             <span class="mono text-[10px] text-on-surface-variant uppercase">SHOWING: <span id="showing-count" class="text-tertiary">0</span></span>
         </nav>
@@ -132,7 +132,7 @@
         <a class="filter-link flex items-center justify-between text-on-surface-variant p-2 hover:bg-surface-variant rounded-sm mb-1 cursor-pointer transition-colors" data-filter="dirty">
             <div class="flex items-center gap-2">
                 <span class="material-symbols-outlined text-[16px]">warning</span>
-                <span>DIRTY</span>
+                <span title="Repos with uncommitted changes — modified, added, or untracked files">DIRTY</span>
             </div>
             <span class="text-[9px] text-error" id="count-dirty-side">0</span>
         </a>
@@ -497,7 +497,7 @@
 
                 // Dirty icon with click handler
                 const dirtyIcon = isDirty
-                    ? `<span class="material-symbols-outlined text-error glow-critical text-[14px] flex-shrink-0 cursor-pointer" onclick="event.stopPropagation(); showDirtyFiles('${p.path.replace(/'/g, "\\'")}', this)">warning</span>`
+                    ? `<span class="material-symbols-outlined text-error glow-critical text-[14px] flex-shrink-0 cursor-pointer" title="Uncommitted changes — click to see changed files" onclick="event.stopPropagation(); showDirtyFiles('${p.path.replace(/'/g, "\\'")}', this)">warning</span>`
                     : `<div class="w-1.5 h-1.5 rounded-full ${dc} flex-shrink-0"></div>`;
 
                 return `
@@ -514,7 +514,7 @@
                                     <span class="px-1 border border-outline-variant ${tc}">${p.project_type}</span>
                                     ${agentTag}
                                     ${techTags}
-                                    ${isDirty ? '<span class="px-1 border border-error/30 text-error">DIRTY</span>' : ''}
+                                    ${isDirty ? '<span class="px-1 border border-error/30 text-error cursor-help" title="Uncommitted changes — click the warning icon to see changed files">DIRTY</span>' : ''}
                                 </div>
                             </div>
                         </div>
@@ -597,6 +597,10 @@
             });
     }
 
+    function nodeRadius(d, connCount) {
+        return Math.max(5, Math.sqrt(connCount[d.id] || 1) * 1.8 + 4);
+    }
+
     function renderGraph(data) {
         const container = document.getElementById('graph-container');
         const svg = d3.select('#graph-svg');
@@ -605,7 +609,8 @@
         const width = container.clientWidth;
         const height = container.clientHeight;
 
-        svg.attr('viewBox', [0, 0, width, height]);
+        // Use width/height attributes, NOT viewBox (viewBox breaks drag coordinates)
+        svg.attr('width', width).attr('height', height);
 
         // Apply current filter
         const searchTerm = document.getElementById('search').value.toLowerCase();
@@ -615,82 +620,104 @@
         data.nodes.forEach(n => {
             const matchesSearch = !searchTerm || n.name.toLowerCase().includes(searchTerm) || (n.description || '').toLowerCase().includes(searchTerm);
             let matchesFilter = currentFilter === 'all' || n.type === currentFilter;
-            if (currentFilter === 'dirty') return; // skip dirty filter for graph
+            if (currentFilter === 'dirty') return;
             const matchesTech = !techFilter || (n.tech && n.tech.includes(techFilter));
             if (matchesSearch && matchesFilter && matchesTech) visibleIds.add(n.id);
         });
 
-        const nodes = data.nodes.filter(n => visibleIds.has(n.id));
+        // Deep clone nodes/edges so D3 mutation doesn't corrupt source data
+        const nodes = data.nodes.filter(n => visibleIds.has(n.id)).map(n => ({...n}));
         const nodeIdSet = new Set(nodes.map(n => n.id));
-        const edges = data.edges.filter(e => nodeIdSet.has(e.source) && nodeIdSet.has(e.target) || nodeIdSet.has(e.source?.id) && nodeIdSet.has(e.target?.id));
+        const edges = data.edges
+            .filter(e => {
+                const s = typeof e.source === 'object' ? e.source.id : e.source;
+                const t = typeof e.target === 'object' ? e.target.id : e.target;
+                return nodeIdSet.has(s) && nodeIdSet.has(t);
+            })
+            .map(e => ({
+                source: typeof e.source === 'object' ? e.source.id : e.source,
+                target: typeof e.target === 'object' ? e.target.id : e.target,
+                weight: e.weight,
+                shared: e.shared,
+            }));
 
         // Count connections per node
         const connCount = {};
         edges.forEach(e => {
-            const s = typeof e.source === 'object' ? e.source.id : e.source;
-            const t = typeof e.target === 'object' ? e.target.id : e.target;
-            connCount[s] = (connCount[s] || 0) + 1;
-            connCount[t] = (connCount[t] || 0) + 1;
+            connCount[e.source] = (connCount[e.source] || 0) + 1;
+            connCount[e.target] = (connCount[e.target] || 0) + 1;
         });
 
-        // Stop existing simulation
+        // Only keep the strongest edges to reduce clutter
+        const maxEdges = Math.min(edges.length, nodes.length * 3);
+        const sortedEdges = edges.sort((a, b) => b.weight - a.weight).slice(0, maxEdges);
+
         if (simulation) simulation.stop();
 
         simulation = d3.forceSimulation(nodes)
-            .force('link', d3.forceLink(edges).id(d => d.id).distance(80).strength(d => Math.min(d.weight / 10, 0.3)))
-            .force('charge', d3.forceManyBody().strength(-120))
+            .force('link', d3.forceLink(sortedEdges).id(d => d.id).distance(150).strength(d => Math.min(d.weight / 20, 0.2)))
+            .force('charge', d3.forceManyBody().strength(-400).distanceMax(600))
             .force('center', d3.forceCenter(width / 2, height / 2))
-            .force('collision', d3.forceCollide().radius(d => Math.max(4, Math.sqrt(connCount[d.id] || 0)) * 2 + 8));
+            .force('collision', d3.forceCollide().radius(d => nodeRadius(d, connCount) + 20).strength(0.8))
+            .force('x', d3.forceX(width / 2).strength(0.03))
+            .force('y', d3.forceY(height / 2).strength(0.03));
 
         const g = svg.append('g');
 
-        // Zoom
-        svg.call(d3.zoom().scaleExtent([0.2, 5]).on('zoom', (event) => {
+        // Zoom + pan
+        const zoom = d3.zoom().scaleExtent([0.1, 8]).on('zoom', (event) => {
             g.attr('transform', event.transform);
-        }));
+        });
+        svg.call(zoom);
 
         // Edges
         const link = g.append('g')
             .selectAll('line')
-            .data(edges)
+            .data(sortedEdges)
             .join('line')
             .attr('stroke', '#30363d')
-            .attr('stroke-opacity', 0.4)
-            .attr('stroke-width', d => Math.min(d.weight / 3, 2));
+            .attr('stroke-opacity', 0.25)
+            .attr('stroke-width', d => Math.min(d.weight / 4, 2));
 
-        // Nodes
-        const node = g.append('g')
-            .selectAll('circle')
+        // Node groups (circle + label)
+        const nodeGroup = g.append('g')
+            .selectAll('g')
             .data(nodes)
-            .join('circle')
-            .attr('r', d => Math.max(4, Math.sqrt(connCount[d.id] || 0)) * 2 + 3)
-            .attr('fill', d => nodeColorMap[d.type] || '#484f58')
-            .attr('stroke', '#0d1117')
-            .attr('stroke-width', 1)
-            .style('cursor', 'pointer')
+            .join('g')
+            .style('cursor', 'grab')
             .call(d3.drag()
                 .on('start', (event, d) => {
                     if (!event.active) simulation.alphaTarget(0.3).restart();
                     d.fx = d.x; d.fy = d.y;
+                    d3.select(event.sourceEvent.target.closest('g')).style('cursor', 'grabbing');
                 })
                 .on('drag', (event, d) => { d.fx = event.x; d.fy = event.y; })
                 .on('end', (event, d) => {
                     if (!event.active) simulation.alphaTarget(0);
                     d.fx = null; d.fy = null;
+                    d3.select(event.sourceEvent.target.closest('g')).style('cursor', 'grab');
                 })
             );
 
-        // Labels for highly connected nodes
-        const label = g.append('g')
-            .selectAll('text')
-            .data(nodes.filter(d => (connCount[d.id] || 0) > 20))
-            .join('text')
-            .text(d => d.name.toUpperCase())
+        // Circles
+        nodeGroup.append('circle')
+            .attr('r', d => nodeRadius(d, connCount))
+            .attr('fill', d => nodeColorMap[d.type] || '#484f58')
+            .attr('fill-opacity', 0.85)
+            .attr('stroke', d => nodeColorMap[d.type] || '#484f58')
+            .attr('stroke-opacity', 0.3)
+            .attr('stroke-width', 2);
+
+        // Labels on ALL nodes
+        nodeGroup.append('text')
+            .text(d => d.name.length > 18 ? d.name.substring(0, 16) + '..' : d.name)
             .attr('font-family', 'JetBrains Mono, monospace')
-            .attr('font-size', '8px')
-            .attr('fill', '#8b949e')
+            .attr('font-size', d => (connCount[d.id] || 0) > 30 ? '9px' : '7px')
+            .attr('font-weight', d => (connCount[d.id] || 0) > 30 ? '500' : '400')
+            .attr('fill', '#c9d1d9')
             .attr('text-anchor', 'middle')
-            .attr('dy', d => -(Math.max(4, Math.sqrt(connCount[d.id] || 0)) * 2 + 8));
+            .attr('dy', d => nodeRadius(d, connCount) + 12)
+            .attr('pointer-events', 'none');
 
         // Tooltip
         const tooltip = document.getElementById('graph-tooltip');
@@ -699,7 +726,7 @@
         const tooltipDesc = document.getElementById('tooltip-desc');
         const tooltipTags = document.getElementById('tooltip-tags');
 
-        node.on('mouseover', (event, d) => {
+        nodeGroup.on('mouseover', (event, d) => {
             tooltip.classList.remove('hidden');
             tooltipName.textContent = d.name.toUpperCase();
             tooltipType.textContent = `${d.type} | ${(connCount[d.id] || 0)} connections`;
@@ -707,21 +734,24 @@
             tooltipTags.textContent = (d.tags || []).join(' · ');
             tooltip.style.left = (event.pageX + 15) + 'px';
             tooltip.style.top = (event.pageY - 10) + 'px';
-            // Highlight connected
+            // Highlight connected nodes
             const connectedIds = new Set();
-            edges.forEach(e => {
+            sortedEdges.forEach(e => {
                 const s = typeof e.source === 'object' ? e.source.id : e.source;
                 const t = typeof e.target === 'object' ? e.target.id : e.target;
                 if (s === d.id) connectedIds.add(t);
                 if (t === d.id) connectedIds.add(s);
             });
-            node.attr('opacity', n => connectedIds.has(n.id) || n.id === d.id ? 1 : 0.15);
+            nodeGroup.attr('opacity', n => connectedIds.has(n.id) || n.id === d.id ? 1 : 0.12);
             link.attr('stroke-opacity', e => {
                 const s = typeof e.source === 'object' ? e.source.id : e.source;
                 const t = typeof e.target === 'object' ? e.target.id : e.target;
-                return (s === d.id || t === d.id) ? 0.8 : 0.05;
+                return (s === d.id || t === d.id) ? 0.7 : 0.03;
+            }).attr('stroke', e => {
+                const s = typeof e.source === 'object' ? e.source.id : e.source;
+                const t = typeof e.target === 'object' ? e.target.id : e.target;
+                return (s === d.id || t === d.id) ? (nodeColorMap[d.type] || '#58a6ff') : '#30363d';
             });
-            label.attr('opacity', n => connectedIds.has(n.id) || n.id === d.id ? 1 : 0.15);
         })
         .on('mousemove', (event) => {
             tooltip.style.left = (event.pageX + 15) + 'px';
@@ -729,12 +759,11 @@
         })
         .on('mouseout', () => {
             tooltip.classList.add('hidden');
-            node.attr('opacity', 1);
-            link.attr('stroke-opacity', 0.4);
-            label.attr('opacity', 1);
+            nodeGroup.attr('opacity', 1);
+            link.attr('stroke-opacity', 0.25).attr('stroke', '#30363d');
         })
         .on('click', (event, d) => {
-            // Open project
+            if (event.defaultPrevented) return; // ignore drag clicks
             if (d.type === 'Obsidian' && d.obsidianUrl) {
                 window.location.href = d.obsidianUrl;
             } else if (['Git', 'Folder', 'Idea'].includes(d.type)) {
@@ -748,8 +777,17 @@
             link
                 .attr('x1', d => d.source.x).attr('y1', d => d.source.y)
                 .attr('x2', d => d.target.x).attr('y2', d => d.target.y);
-            node.attr('cx', d => d.x).attr('cy', d => d.y);
-            label.attr('x', d => d.x).attr('y', d => d.y);
+            nodeGroup.attr('transform', d => `translate(${d.x},${d.y})`);
+        });
+
+        // Auto-zoom to fit after simulation settles
+        simulation.on('end', () => {
+            const bounds = g.node().getBBox();
+            const pad = 40;
+            const scale = Math.min(width / (bounds.width + pad * 2), height / (bounds.height + pad * 2), 1.5);
+            const tx = width / 2 - (bounds.x + bounds.width / 2) * scale;
+            const ty = height / 2 - (bounds.y + bounds.height / 2) * scale;
+            svg.transition().duration(500).call(zoom.transform, d3.zoomIdentity.translate(tx, ty).scale(scale));
         });
     }
 
