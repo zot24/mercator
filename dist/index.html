@@ -55,6 +55,7 @@
         .custom-scrollbar::-webkit-scrollbar-track { background: #010409; }
         .custom-scrollbar::-webkit-scrollbar-thumb { background: #30363d; }
         select { background-image: none; }
+        @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.3; } }
     </style>
 </head>
 <body class="bg-surface text-on-surface custom-scrollbar overflow-hidden">
@@ -135,6 +136,14 @@
                 <span title="Repos with uncommitted changes — modified, added, or untracked files">DIRTY</span>
             </div>
             <span class="text-[9px] text-error" id="count-dirty-side">0</span>
+        </a>
+        <div class="mt-3 mb-1 border-t border-outline-variant pt-3"></div>
+        <a class="filter-link flex items-center justify-between text-on-surface-variant p-2 hover:bg-surface-variant rounded-sm mb-1 cursor-pointer transition-colors" data-filter="agents" onclick="showAgentsView()">
+            <div class="flex items-center gap-2">
+                <span class="material-symbols-outlined text-[16px]">smart_toy</span>
+                <span>AGENTS</span>
+            </div>
+            <span class="text-[9px]" id="count-agents"><span id="agents-pulse" class="hidden inline-block w-1.5 h-1.5 rounded-full bg-tertiary mr-1" style="animation: pulse 1.5s infinite"></span><span id="agents-count">0</span></span>
         </a>
     </nav>
 
@@ -270,9 +279,73 @@
     </div>
 </div>
 
+<!-- Launch Agent Modal -->
+<div class="fixed inset-0 bg-black/80 hidden justify-center items-center z-[1000]" id="launch-modal">
+    <div class="bg-surface border border-outline-variant p-5 max-w-md w-[90%] rounded-lg">
+        <h2 class="text-primary font-bold text-xs tracking-tight mb-4 mono flex items-center gap-2">
+            <span class="material-symbols-outlined text-[16px]">smart_toy</span>
+            LAUNCH_AGENT
+        </h2>
+        <div class="mono text-[10px] text-on-surface-variant mb-3" id="launch-project-name"></div>
+        <input type="hidden" id="launch-project-path"/>
+        <div class="mb-3">
+            <label class="text-[9px] mono text-on-surface-variant block mb-1">PROMPT</label>
+            <textarea id="launch-prompt" rows="3"
+                class="w-full bg-surface-dim border border-outline-variant text-on-surface text-[11px] mono p-2.5 focus:border-primary/50 focus:ring-0 resize-y rounded"
+                placeholder="What should the agent do?"></textarea>
+        </div>
+        <div class="grid grid-cols-3 gap-2 mb-4">
+            <div>
+                <label class="text-[9px] mono text-on-surface-variant block mb-1">MODEL</label>
+                <select id="launch-model" class="w-full bg-surface-dim border border-outline-variant text-on-surface-variant text-[10px] mono py-1.5 px-1.5 focus:border-primary/50 focus:ring-0 rounded">
+                    <option value="sonnet">Sonnet</option>
+                    <option value="opus">Opus</option>
+                    <option value="haiku">Haiku</option>
+                </select>
+            </div>
+            <div>
+                <label class="text-[9px] mono text-on-surface-variant block mb-1">MODE</label>
+                <select id="launch-mode" class="w-full bg-surface-dim border border-outline-variant text-on-surface-variant text-[10px] mono py-1.5 px-1.5 focus:border-primary/50 focus:ring-0 rounded">
+                    <option value="plan">Plan</option>
+                    <option value="acceptEdits" selected>Accept Edits</option>
+                    <option value="bypassPermissions">Full Auto</option>
+                </select>
+            </div>
+            <div>
+                <label class="text-[9px] mono text-on-surface-variant block mb-1">BUDGET</label>
+                <input type="number" id="launch-budget" value="1.00" step="0.50" min="0.10"
+                    class="w-full bg-surface-dim border border-outline-variant text-on-surface text-[10px] mono py-1.5 px-1.5 focus:border-primary/50 focus:ring-0 rounded"/>
+            </div>
+        </div>
+        <div class="flex justify-end gap-2">
+            <button onclick="closeLaunchModal()" class="mono px-3 py-1.5 text-[10px] border border-outline-variant text-on-surface-variant hover:text-on-surface transition-colors rounded">CANCEL</button>
+            <button onclick="launchAgent()" class="mono px-3 py-1.5 text-[10px] bg-tertiary text-surface-dim font-medium hover:brightness-110 transition-all rounded">LAUNCH</button>
+        </div>
+    </div>
+</div>
+
+<!-- Agents View (job list) -->
+<div id="agents-view" class="hidden ml-48 mt-10 p-4 overflow-y-auto h-[calc(100vh-2.5rem-1.5rem)] custom-scrollbar pb-12">
+    <div class="mono text-[10px] text-on-surface-variant uppercase mb-4">AGENT_JOBS</div>
+    <div id="agents-list" class="flex flex-col gap-[2px]"></div>
+</div>
+
+<!-- Log Viewer Modal -->
+<div class="fixed inset-0 bg-black/80 hidden justify-center items-center z-[1000]" id="log-modal">
+    <div class="bg-surface border border-outline-variant p-5 max-w-3xl w-[95%] max-h-[80vh] rounded-lg flex flex-col">
+        <div class="flex justify-between items-center mb-3">
+            <h2 class="text-primary font-bold text-xs tracking-tight mono">AGENT_LOG</h2>
+            <button onclick="closeLogModal()" class="material-symbols-outlined text-on-surface-variant hover:text-on-surface text-[16px]">close</button>
+        </div>
+        <pre id="log-content" class="flex-1 overflow-y-auto bg-surface-dim border border-outline-variant p-3 mono text-[10px] text-on-surface-variant custom-scrollbar rounded" style="white-space: pre-wrap; word-break: break-all;"></pre>
+    </div>
+</div>
+
 <script>
     let projects = [];
     let currentFilter = 'all';
+    let agentJobs = [];
+    let agentPollTimer = null;
 
     function escapeHtml(str) {
         const div = document.createElement('div');
@@ -404,6 +477,133 @@
 
     function refreshSurvey() { document.getElementById('refresh-icon').textContent = 'hourglass_empty'; location.reload(); }
 
+    // ── Agent Management ──────────────────────────────────────
+    function openLaunchModal(projectPath, projectName) {
+        document.getElementById('launch-project-path').value = projectPath;
+        document.getElementById('launch-project-name').textContent = 'PROJECT: ' + projectName.toUpperCase();
+        document.getElementById('launch-prompt').value = '';
+        const m = document.getElementById('launch-modal');
+        m.classList.remove('hidden'); m.classList.add('flex');
+        document.getElementById('launch-prompt').focus();
+    }
+
+    function closeLaunchModal() {
+        const m = document.getElementById('launch-modal');
+        m.classList.add('hidden'); m.classList.remove('flex');
+    }
+
+    function launchAgent() {
+        const projectPath = document.getElementById('launch-project-path').value;
+        const prompt = document.getElementById('launch-prompt').value.trim();
+        if (!prompt) { showToast('Enter a prompt', true); return; }
+
+        fetch('/api/agent/run', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                project_path: projectPath,
+                prompt: prompt,
+                model: document.getElementById('launch-model').value,
+                permission_mode: document.getElementById('launch-mode').value,
+                max_budget_usd: parseFloat(document.getElementById('launch-budget').value) || 1.0,
+            })
+        }).then(r => r.json()).then(data => {
+            closeLaunchModal();
+            showToast('AGENT LAUNCHED: ' + data.job_id?.substring(0, 8));
+            startAgentPolling();
+            showAgentsView();
+        }).catch(e => showToast('Failed to launch: ' + e, true));
+    }
+
+    function showAgentsView() {
+        document.getElementById('map').classList.add('hidden');
+        document.getElementById('graph-container').classList.add('hidden');
+        document.getElementById('agents-view').classList.remove('hidden');
+        document.querySelector('main').classList.add('hidden');
+        fetchAndRenderJobs();
+        startAgentPolling();
+    }
+
+    function hideAgentsView() {
+        document.getElementById('agents-view').classList.add('hidden');
+        document.querySelector('main').classList.remove('hidden');
+    }
+
+    function fetchAndRenderJobs() {
+        fetch('/api/agent/jobs').then(r => r.json()).then(jobs => {
+            agentJobs = jobs;
+            renderAgentJobs(jobs);
+            // Update sidebar count
+            const running = jobs.filter(j => j.status === 'running').length;
+            document.getElementById('agents-count').textContent = jobs.length;
+            document.getElementById('agents-pulse').classList.toggle('hidden', running === 0);
+            // Stop polling if no running jobs
+            if (running === 0 && agentPollTimer) {
+                clearInterval(agentPollTimer);
+                agentPollTimer = null;
+            }
+        });
+    }
+
+    function startAgentPolling() {
+        if (agentPollTimer) return;
+        agentPollTimer = setInterval(fetchAndRenderJobs, 3000);
+    }
+
+    function renderAgentJobs(jobs) {
+        const list = document.getElementById('agents-list');
+        if (jobs.length === 0) {
+            list.innerHTML = '<div class="text-center py-16 mono text-sm text-on-surface-variant">NO_AGENTS_RUNNING</div>';
+            return;
+        }
+        list.innerHTML = jobs.map(j => {
+            const statusIcon = j.status === 'running' ? '<span class="w-2 h-2 rounded-full bg-tertiary inline-block" style="animation: pulse 1.5s infinite"></span>'
+                : j.status === 'succeeded' ? '<span class="text-tertiary mono text-[12px]">✓</span>'
+                : '<span class="text-error mono text-[12px]">✗</span>';
+            const statusColor = j.status === 'running' ? 'text-tertiary' : j.status === 'succeeded' ? 'text-on-surface' : 'text-error';
+            return `
+            <div class="flex items-center justify-between p-3 bg-surface obsidian-border hover:bg-surface-variant transition-colors">
+                <div class="flex items-center gap-4 min-w-0 flex-1">
+                    ${statusIcon}
+                    <div class="min-w-0 flex-1">
+                        <h3 class="mono text-[11px] font-bold ${statusColor} leading-none mb-1 truncate">${escapeHtml(j.project_name.toUpperCase())}</h3>
+                        <div class="flex items-center gap-1.5 mono text-[9px] text-on-surface-variant flex-wrap">
+                            <span class="px-1 border border-outline-variant">${j.model}</span>
+                            <span class="px-1 border border-outline-variant">${j.permission_mode}</span>
+                            <span>·</span>
+                            <span class="truncate max-w-[250px]">${escapeHtml(j.prompt)}</span>
+                        </div>
+                    </div>
+                </div>
+                <div class="flex items-center gap-3 flex-shrink-0 ml-4 mono text-[9px] text-on-surface-variant">
+                    <span>${j.tool_calls} tools</span>
+                    <span>$${j.cost_usd.toFixed(2)}</span>
+                    <button onclick="viewJobLog('${j.id}')" class="px-2 py-0.5 border border-outline-variant hover:border-primary hover:text-primary transition-colors">LOG</button>
+                    ${j.status === 'running' ? `<button onclick="cancelJob('${j.id}')" class="px-2 py-0.5 border border-error/30 text-error hover:border-error transition-colors">STOP</button>` : ''}
+                </div>
+            </div>`;
+        }).join('');
+    }
+
+    function viewJobLog(jobId) {
+        fetch('/api/agent/job/' + jobId + '/log')
+            .then(r => r.text())
+            .then(log => {
+                document.getElementById('log-content').textContent = log;
+                const m = document.getElementById('log-modal');
+                m.classList.remove('hidden'); m.classList.add('flex');
+            });
+    }
+
+    function closeLogModal() {
+        const m = document.getElementById('log-modal');
+        m.classList.add('hidden'); m.classList.remove('flex');
+    }
+
+    function cancelJob(jobId) {
+        showToast('Cancel not yet implemented');
+    }
+
     function formatDate(iso) {
         if (!iso) return '';
         return new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
@@ -481,6 +681,7 @@
                         <a href="vscode://file/${encodeURIComponent(p.path)}" onclick="event.stopPropagation()" class="mono text-[9px] px-2 py-0.5 border border-outline-variant ${hb} transition-colors">IDE</a>
                         <button onclick="event.stopPropagation(); openInTerminal('claude', '${safePath}')" class="mono text-[9px] px-2 py-0.5 border border-outline-variant ${hb} transition-colors ${p.agentUsed === 'claude' ? tc + ' border-current' : ''}">CLAUDE</button>
                         <button onclick="event.stopPropagation(); openInTerminal('codex', '${safePath}')" class="mono text-[9px] px-2 py-0.5 border border-outline-variant ${hb} transition-colors ${p.agentUsed === 'codex' ? tc + ' border-current' : ''}">CODEX</button>
+                        <button onclick="event.stopPropagation(); openLaunchModal('${safePath}', '${p.name.replace(/'/g, "\\'")}')" class="mono text-[9px] px-2 py-0.5 border border-tertiary/30 text-tertiary hover:border-tertiary transition-colors">RUN</button>
                         ${noteBtn}
                     `;
                 } else if (isObsidian) {
@@ -539,6 +740,8 @@
             link.classList.add('text-primary', 'bg-surface-variant/50', 'active');
             link.classList.remove('text-on-surface-variant');
             currentFilter = link.dataset.filter;
+            if (link.dataset.filter === 'agents') return; // handled by showAgentsView()
+            hideAgentsView();
             renderProjects();
             if (currentView === 'graph' && graphData) renderGraph(graphData);
         });
