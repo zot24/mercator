@@ -1,0 +1,564 @@
+<!DOCTYPE html>
+<html class="dark" lang="en">
+<head>
+    <meta charset="utf-8"/>
+    <meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+    <title>MERCATOR | PROJECT_TOPOGRAPHY</title>
+    <script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&display=swap" rel="stylesheet"/>
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet"/>
+    <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap" rel="stylesheet"/>
+    <script>
+      tailwind.config = {
+        darkMode: "class",
+        theme: {
+          extend: {
+            colors: {
+              "surface": "#0d1117",
+              "surface-dim": "#010409",
+              "surface-variant": "#21262d",
+              "surface-bright": "#161b22",
+              "surface-high": "#161b22",
+              "surface-highest": "#1c1c1c",
+              "on-surface": "#c9d1d9",
+              "on-surface-variant": "#8b949e",
+              "outline": "#484f58",
+              "outline-variant": "#30363d",
+              "primary": "#58a6ff",
+              "secondary": "#bc8cff",
+              "tertiary": "#3fb950",
+              "error": "#f85149",
+              "claude-orange": "#d29922",
+              "codex-green": "#3fb950",
+            },
+            fontFamily: {
+              "headline": ["Space Grotesk"],
+              "body": ["Space Grotesk"],
+              "mono": ["JetBrains Mono", "monospace"],
+            },
+            borderRadius: { "DEFAULT": "2px", "lg": "4px", "xl": "6px", "full": "9999px" },
+          },
+        },
+      }
+    </script>
+    <style>
+        body { font-family: 'Space Grotesk', sans-serif; }
+        .mono { font-family: 'JetBrains Mono', monospace; }
+        .material-symbols-outlined {
+            font-variation-settings: 'FILL' 0, 'wght' 300, 'GRAD' 0, 'opsz' 20;
+            font-size: 18px;
+        }
+        .glow-critical { filter: drop-shadow(0 0 2px #f85149); }
+        .obsidian-border { border: 1px solid #30363d; }
+        .custom-scrollbar::-webkit-scrollbar { width: 4px; }
+        .custom-scrollbar::-webkit-scrollbar-track { background: #010409; }
+        .custom-scrollbar::-webkit-scrollbar-thumb { background: #30363d; }
+        select { background-image: none; }
+    </style>
+</head>
+<body class="bg-surface text-on-surface custom-scrollbar overflow-hidden">
+
+<!-- TopNavBar -->
+<header class="fixed top-0 w-full z-50 flex justify-between items-center px-4 py-2 bg-surface-dim border-b border-outline-variant h-10">
+    <div class="flex items-center gap-6">
+        <span class="text-primary font-bold tracking-tight text-sm">MERCATOR</span>
+        <nav class="hidden md:flex gap-4 items-center">
+            <span class="mono text-[10px] text-on-surface-variant uppercase">PROJECTS: <span id="total-count" class="text-on-surface">0</span></span>
+            <div class="h-3 w-px bg-outline-variant"></div>
+            <span class="mono text-[10px] text-on-surface-variant uppercase">DIRTY: <span id="count-dirty" class="text-error">0</span></span>
+            <div class="h-3 w-px bg-outline-variant"></div>
+            <span class="mono text-[10px] text-on-surface-variant uppercase">SHOWING: <span id="showing-count" class="text-tertiary">0</span></span>
+        </nav>
+    </div>
+    <div class="flex items-center gap-3">
+        <button onclick="refreshSurvey()" class="material-symbols-outlined text-on-surface-variant hover:text-on-surface transition-colors text-[16px]" title="Refresh"><span id="refresh-icon">sync</span></button>
+        <button onclick="openSettings()" class="material-symbols-outlined text-on-surface-variant hover:text-on-surface transition-colors text-[16px]" title="Settings">settings</button>
+    </div>
+</header>
+
+<!-- SideNavBar -->
+<aside class="fixed left-0 top-0 h-full flex flex-col z-40 bg-surface-dim w-48 border-r border-outline-variant pt-10">
+    <nav class="flex-1 mono text-[11px] font-medium px-2 pt-3" id="sidebar-filters">
+        <a class="filter-link active flex items-center justify-between text-primary bg-surface-variant/50 p-2 rounded-sm mb-1 cursor-pointer" data-filter="all">
+            <div class="flex items-center gap-2">
+                <span class="material-symbols-outlined text-[16px]">apps</span>
+                <span>ALL</span>
+            </div>
+            <span class="text-[9px] text-on-surface-variant" id="count-all">0</span>
+        </a>
+        <a class="filter-link flex items-center justify-between text-on-surface-variant p-2 hover:bg-surface-variant rounded-sm mb-1 cursor-pointer transition-colors" data-filter="Git">
+            <div class="flex items-center gap-2">
+                <span class="material-symbols-outlined text-[16px]">terminal</span>
+                <span>GIT_REPOS</span>
+            </div>
+            <span class="text-[9px]" id="count-git">0</span>
+        </a>
+        <a class="filter-link flex items-center justify-between text-on-surface-variant p-2 hover:bg-surface-variant rounded-sm mb-1 cursor-pointer transition-colors" data-filter="GitHub">
+            <div class="flex items-center gap-2">
+                <span class="material-symbols-outlined text-[16px]">cloud</span>
+                <span>GITHUB</span>
+            </div>
+            <span class="text-[9px]" id="count-github">0</span>
+        </a>
+        <a class="filter-link flex items-center justify-between text-on-surface-variant p-2 hover:bg-surface-variant rounded-sm mb-1 cursor-pointer transition-colors" data-filter="GitLab">
+            <div class="flex items-center gap-2">
+                <span class="material-symbols-outlined text-[16px]">cloud_queue</span>
+                <span>GITLAB</span>
+            </div>
+            <span class="text-[9px]" id="count-gitlab">0</span>
+        </a>
+        <a class="filter-link flex items-center justify-between text-on-surface-variant p-2 hover:bg-surface-variant rounded-sm mb-1 cursor-pointer transition-colors" data-filter="Idea">
+            <div class="flex items-center gap-2">
+                <span class="material-symbols-outlined text-[16px]">lightbulb</span>
+                <span>IDEAS</span>
+            </div>
+            <span class="text-[9px]" id="count-idea">0</span>
+        </a>
+        <a class="filter-link flex items-center justify-between text-on-surface-variant p-2 hover:bg-surface-variant rounded-sm mb-1 cursor-pointer transition-colors" data-filter="Obsidian">
+            <div class="flex items-center gap-2">
+                <span class="material-symbols-outlined text-[16px]">edit_note</span>
+                <span>OBSIDIAN</span>
+            </div>
+            <span class="text-[9px]" id="count-obsidian">0</span>
+        </a>
+        <a class="filter-link flex items-center justify-between text-on-surface-variant p-2 hover:bg-surface-variant rounded-sm mb-1 cursor-pointer transition-colors" data-filter="Folder">
+            <div class="flex items-center gap-2">
+                <span class="material-symbols-outlined text-[16px]">folder_open</span>
+                <span>FOLDERS</span>
+            </div>
+            <span class="text-[9px]" id="count-folder">0</span>
+        </a>
+        <a class="filter-link flex items-center justify-between text-on-surface-variant p-2 hover:bg-surface-variant rounded-sm mb-1 cursor-pointer transition-colors" data-filter="dirty">
+            <div class="flex items-center gap-2">
+                <span class="material-symbols-outlined text-[16px]">warning</span>
+                <span>DIRTY</span>
+            </div>
+            <span class="text-[9px] text-error" id="count-dirty-side">0</span>
+        </a>
+    </nav>
+
+    <div class="border-t border-outline-variant p-2 mono text-[10px] space-y-2">
+        <div>
+            <label class="text-[9px] text-on-surface-variant uppercase block mb-1">SORT</label>
+            <select id="sort" class="w-full bg-surface-dim border border-outline-variant text-on-surface-variant text-[10px] mono py-1 px-1.5 focus:border-primary/50 focus:ring-0">
+                <option value="name-asc">NAME A-Z</option>
+                <option value="name-desc">NAME Z-A</option>
+                <option value="date-desc">NEWEST</option>
+                <option value="date-asc">OLDEST</option>
+            </select>
+        </div>
+        <div>
+            <label class="text-[9px] text-on-surface-variant uppercase block mb-1">TECH</label>
+            <select id="tech-filter" class="w-full bg-surface-dim border border-outline-variant text-on-surface-variant text-[10px] mono py-1 px-1.5 focus:border-primary/50 focus:ring-0">
+                <option value="">ALL</option>
+                <option value="Node.js">Node.js</option>
+                <option value="Python">Python</option>
+                <option value="Rust">Rust</option>
+                <option value="Go">Go</option>
+                <option value="Docker">Docker</option>
+                <option value="TypeScript">TypeScript</option>
+            </select>
+        </div>
+    </div>
+
+    <div class="border-t border-outline-variant p-2 mono text-[10px]">
+        <a onclick="openSettings()" class="flex items-center gap-2 text-on-surface-variant p-2 hover:text-on-surface cursor-pointer transition-colors">
+            <span class="material-symbols-outlined text-[16px]">settings</span>
+            <span>SETTINGS</span>
+        </a>
+    </div>
+</aside>
+
+<!-- Main Content -->
+<main class="ml-48 mt-10 p-4 overflow-y-auto h-[calc(100vh-2.5rem-1.5rem)] custom-scrollbar pb-12">
+    <!-- Search Bar -->
+    <div class="flex items-center justify-between gap-4 mb-4">
+        <div class="relative flex-1 max-w-2xl">
+            <div class="absolute inset-y-0 left-3 flex items-center pointer-events-none">
+                <span class="material-symbols-outlined text-on-surface-variant text-[16px]">search</span>
+            </div>
+            <input id="search" type="text"
+                class="w-full bg-surface-dim border border-outline-variant focus:border-primary/50 focus:ring-0 text-on-surface text-[11px] mono placeholder:text-outline py-1.5 pl-10 pr-20 transition-colors"
+                placeholder="Search repositories..."/>
+            <div class="absolute inset-y-0 right-3 flex items-center pointer-events-none">
+                <span class="mono text-[9px] text-outline px-1.5 py-0.5 border border-outline-variant rounded bg-surface-variant">/</span>
+            </div>
+        </div>
+    </div>
+
+    <!-- Project List -->
+    <div id="map" class="flex flex-col gap-[2px]"></div>
+</main>
+
+<!-- Footer -->
+<footer class="fixed bottom-0 w-full z-50 flex justify-between items-center px-4 py-1 bg-surface-dim border-t border-outline-variant h-6">
+    <div class="mono text-[9px] text-on-surface-variant uppercase">
+        SYS_STATUS: ONLINE <span class="mx-2">|</span> SCAN: COMPLETE <span class="mx-2">|</span> v0.1.0
+    </div>
+    <div class="flex gap-4">
+        <span class="mono text-[9px] text-on-surface-variant">MERCATOR</span>
+    </div>
+</footer>
+
+<!-- Settings Modal -->
+<div class="fixed inset-0 bg-black/80 hidden justify-center items-center z-[1000]" id="settings-modal">
+    <div class="bg-surface border border-outline-variant p-5 max-w-lg w-[90%] max-h-[80vh] overflow-y-auto custom-scrollbar rounded-lg">
+        <h2 class="text-primary font-bold text-xs tracking-tight mb-5 flex items-center gap-2 mono">
+            <span class="material-symbols-outlined text-[16px]">settings</span>
+            CONFIGURATION
+        </h2>
+
+        <div class="mono text-[9px] font-medium text-on-surface-variant uppercase mb-2 pb-1.5 border-b border-outline-variant">LOCAL_PATHS</div>
+        <div class="mb-4">
+            <textarea id="local-paths" rows="3"
+                class="w-full bg-surface-dim border border-outline-variant text-on-surface text-[11px] mono p-2.5 focus:border-primary/50 focus:ring-0 placeholder:text-outline resize-y rounded"
+                placeholder="/Users/anon/Desktop/code&#10;~/projects"></textarea>
+            <p class="text-[9px] text-on-surface-variant mt-1 mono">One directory per line</p>
+        </div>
+
+        <div class="mono text-[9px] font-medium text-on-surface-variant uppercase mb-2 pb-1.5 border-b border-outline-variant">GITHUB</div>
+        <div class="mb-2">
+            <label class="text-[9px] mono text-on-surface-variant block mb-1">USERNAME</label>
+            <input type="text" id="github-user"
+                class="w-full bg-surface-dim border border-outline-variant text-on-surface text-[11px] mono p-2 focus:border-primary/50 focus:ring-0 rounded" placeholder="octocat"/>
+        </div>
+        <div class="mb-4">
+            <label class="text-[9px] mono text-on-surface-variant block mb-1">TOKEN</label>
+            <input type="password" id="github-token"
+                class="w-full bg-surface-dim border border-outline-variant text-on-surface text-[11px] mono p-2 focus:border-primary/50 focus:ring-0 rounded" placeholder="ghp_xxxxx"/>
+        </div>
+
+        <div class="mono text-[9px] font-medium text-on-surface-variant uppercase mb-2 pb-1.5 border-b border-outline-variant">GITLAB</div>
+        <div class="mb-2">
+            <label class="text-[9px] mono text-on-surface-variant block mb-1">USERNAME</label>
+            <input type="text" id="gitlab-user"
+                class="w-full bg-surface-dim border border-outline-variant text-on-surface text-[11px] mono p-2 focus:border-primary/50 focus:ring-0 rounded" placeholder="gitlabuser"/>
+        </div>
+        <div class="mb-2">
+            <label class="text-[9px] mono text-on-surface-variant block mb-1">URL</label>
+            <input type="text" id="gitlab-url" value="https://gitlab.com"
+                class="w-full bg-surface-dim border border-outline-variant text-on-surface text-[11px] mono p-2 focus:border-primary/50 focus:ring-0 rounded"/>
+        </div>
+        <div class="mb-4">
+            <label class="text-[9px] mono text-on-surface-variant block mb-1">TOKEN</label>
+            <input type="password" id="gitlab-token"
+                class="w-full bg-surface-dim border border-outline-variant text-on-surface text-[11px] mono p-2 focus:border-primary/50 focus:ring-0 rounded" placeholder="glpat-xxxxx"/>
+        </div>
+
+        <div class="flex justify-end gap-2 mt-5">
+            <button onclick="closeSettings()" class="mono px-3 py-1.5 text-[10px] border border-outline-variant text-on-surface-variant hover:text-on-surface hover:border-on-surface-variant transition-colors rounded">CANCEL</button>
+            <button onclick="saveSettings()" class="mono px-3 py-1.5 text-[10px] bg-primary text-surface-dim font-medium hover:brightness-110 transition-all rounded">SAVE</button>
+        </div>
+    </div>
+</div>
+
+<script>
+    let projects = [];
+    let currentFilter = 'all';
+
+    function escapeHtml(str) {
+        const div = document.createElement('div');
+        div.textContent = str;
+        return div.innerHTML;
+    }
+
+    const dotColor = {
+        'Git': 'bg-primary',
+        'GitHub': 'bg-secondary',
+        'GitLab': 'bg-secondary',
+        'Idea': 'bg-tertiary',
+        'Folder': 'bg-outline',
+        'Obsidian': 'bg-[#a88bfa]',
+    };
+    const textColor = {
+        'Git': 'text-primary',
+        'GitHub': 'text-secondary',
+        'GitLab': 'text-secondary',
+        'Idea': 'text-tertiary',
+        'Folder': 'text-on-surface-variant',
+        'Obsidian': 'text-[#a88bfa]',
+    };
+    const hoverBorder = {
+        'Git': 'hover:border-primary',
+        'GitHub': 'hover:border-secondary',
+        'GitLab': 'hover:border-secondary',
+        'Idea': 'hover:border-tertiary',
+        'Folder': 'hover:border-outline',
+        'Obsidian': 'hover:border-[#a88bfa]',
+    };
+
+    function rowClick(p) {
+        const isLocal = ['Git', 'Folder', 'Idea'].includes(p.project_type);
+        if (p.project_type === 'Obsidian' && p.obsidianUrl) {
+            window.location.href = p.obsidianUrl;
+        } else if (isLocal) {
+            window.location.href = 'vscode://file/' + encodeURIComponent(p.path);
+        } else {
+            window.open(p.path, '_blank');
+        }
+    }
+
+    async function showDirtyFiles(path, btnEl) {
+        // Remove any existing popup
+        document.querySelectorAll('.dirty-popup').forEach(el => el.remove());
+        try {
+            const r = await fetch('/api/git-status?path=' + encodeURIComponent(path));
+            const data = await r.json();
+            if (data.files && data.files.length) {
+                const popup = document.createElement('div');
+                popup.className = 'dirty-popup fixed bg-surface-dim border border-outline-variant p-3 z-[999] max-w-sm max-h-48 overflow-y-auto custom-scrollbar shadow-lg';
+                popup.innerHTML = '<div class="mono text-[9px] text-on-surface-variant uppercase mb-2">CHANGED FILES</div>' +
+                    data.files.map(f => `<div class="mono text-[10px] text-on-surface truncate">${escapeHtml(f)}</div>`).join('');
+                // Position near the button
+                const rect = btnEl.getBoundingClientRect();
+                popup.style.top = (rect.bottom + 4) + 'px';
+                popup.style.left = Math.min(rect.left, window.innerWidth - 320) + 'px';
+                document.body.appendChild(popup);
+                // Close on click outside
+                setTimeout(() => {
+                    document.addEventListener('click', function handler() {
+                        popup.remove();
+                        document.removeEventListener('click', handler);
+                    }, { once: true });
+                }, 10);
+            }
+        } catch(e) { /* ignore */ }
+    }
+
+    function openInTerminal(agent, projectPath) {
+        const cmd = agent === 'claude' ? 'claude' : 'codex';
+        fetch('/api/open-terminal', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ agent: cmd, path: projectPath })
+        }).then(r => r.json()).then(data => {
+            if (!data.success) showToast('ERROR: ' + (data.error || 'Unknown'), true);
+        }).catch(() => {
+            copyToClipboard(`cd "${projectPath}" && ${cmd}`);
+        });
+    }
+
+    function copyToClipboard(text) {
+        navigator.clipboard.writeText(text).then(() => showToast('COPIED'));
+    }
+
+    function showToast(msg, isError) {
+        const el = document.createElement('div');
+        el.textContent = msg;
+        el.className = `fixed bottom-8 right-4 px-3 py-1.5 mono text-[10px] z-[9999] rounded ${isError ? 'bg-error text-white' : 'bg-tertiary text-surface-dim'}`;
+        document.body.appendChild(el);
+        setTimeout(() => el.remove(), 2000);
+    }
+
+    function getSettings() {
+        const defaults = { localPaths: ['/Users/anon/Desktop/code'], github: { user: '', token: '' }, gitlab: { user: '', token: '', url: 'https://gitlab.com' } };
+        const stored = localStorage.getItem('mercator-settings');
+        return stored ? JSON.parse(stored) : defaults;
+    }
+
+    function saveSettingsToStorage(s) { localStorage.setItem('mercator-settings', JSON.stringify(s)); }
+
+    function openSettings() {
+        const s = getSettings();
+        document.getElementById('local-paths').value = s.localPaths.join('\n');
+        document.getElementById('github-user').value = s.github.user;
+        document.getElementById('github-token').value = s.github.token;
+        document.getElementById('gitlab-user').value = s.gitlab.user;
+        document.getElementById('gitlab-url').value = s.gitlab.url;
+        document.getElementById('gitlab-token').value = s.gitlab.token;
+        const m = document.getElementById('settings-modal');
+        m.classList.remove('hidden'); m.classList.add('flex');
+    }
+
+    function closeSettings() {
+        const m = document.getElementById('settings-modal');
+        m.classList.add('hidden'); m.classList.remove('flex');
+    }
+
+    function saveSettings() {
+        const s = {
+            localPaths: document.getElementById('local-paths').value.split('\n').filter(p => p.trim()),
+            github: { user: document.getElementById('github-user').value.trim(), token: document.getElementById('github-token').value.trim() },
+            gitlab: { user: document.getElementById('gitlab-user').value.trim(), token: document.getElementById('gitlab-token').value.trim(), url: document.getElementById('gitlab-url').value.trim() || 'https://gitlab.com' }
+        };
+        saveSettingsToStorage(s); closeSettings(); refreshSurvey();
+    }
+
+    function refreshSurvey() { document.getElementById('refresh-icon').textContent = 'hourglass_empty'; location.reload(); }
+
+    function formatDate(iso) {
+        if (!iso) return '';
+        return new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+    }
+
+    function sortProjects(arr, by) {
+        const s = [...arr];
+        switch (by) {
+            case 'name-asc': return s.sort((a, b) => a.name.localeCompare(b.name));
+            case 'name-desc': return s.sort((a, b) => b.name.localeCompare(a.name));
+            case 'date-desc': return s.sort((a, b) => (b.lastModified || '').localeCompare(a.lastModified || ''));
+            case 'date-asc': return s.sort((a, b) => (a.lastModified || '').localeCompare(b.lastModified || ''));
+            default: return s;
+        }
+    }
+
+    function renderProjects() {
+        const searchTerm = document.getElementById('search').value.toLowerCase();
+        const techFilter = document.getElementById('tech-filter').value;
+
+        let filtered = projects.filter(p => {
+            const matchesSearch = p.name.toLowerCase().includes(searchTerm) || (p.description || '').toLowerCase().includes(searchTerm);
+            let matchesFilter = currentFilter === 'all' || p.project_type === currentFilter;
+            if (currentFilter === 'dirty') matchesFilter = p.gitStatus === 'uncommitted';
+            const matchesTech = !techFilter || (p.techStack && p.techStack.includes(techFilter));
+            return matchesSearch && matchesFilter && matchesTech;
+        });
+
+        filtered = sortProjects(filtered, document.getElementById('sort').value);
+        const map = document.getElementById('map');
+
+        if (filtered.length === 0) {
+            map.innerHTML = '<div class="text-center py-16 mono text-sm text-on-surface-variant">NO_RESULTS</div>';
+        } else {
+            // Store filtered projects for row click access
+            window._filteredProjects = filtered;
+            map.innerHTML = filtered.map((p, idx) => {
+                const isDirty = p.gitStatus === 'uncommitted';
+                const isLocal = ['Git', 'Folder', 'Idea'].includes(p.project_type);
+                const isObsidian = p.project_type === 'Obsidian';
+                const tc = textColor[p.project_type] || 'text-on-surface-variant';
+                const dc = dotColor[p.project_type] || 'bg-outline';
+                const hb = hoverBorder[p.project_type] || 'hover:border-outline';
+
+                // Agent badge
+                const agentTag = p.agentUsed === 'claude'
+                    ? '<span class="px-1 border border-claude-orange/30 text-claude-orange">CLAUDE</span>'
+                    : p.agentUsed === 'codex'
+                    ? '<span class="px-1 border border-codex-green/30 text-codex-green">CODEX</span>'
+                    : '';
+
+                // Tech tags
+                const techTags = (p.techStack || []).slice(0, 3).map(t =>
+                    `<span class="px-1 border border-outline-variant">${escapeHtml(t)}</span>`
+                ).join('');
+
+                // Branch display
+                const branchTag = p.gitBranch
+                    ? `<span class="${tc} ${tc.replace('text-', 'bg-')}/10 px-1">${escapeHtml(p.gitBranch)}</span>`
+                    : '';
+
+                // Dirty border
+                const dirtyBorder = isDirty ? 'border-l-2 border-l-error' : '';
+
+                // NOTE button for projects with linked Obsidian notes
+                const noteBtn = p.obsidianUrl
+                    ? `<a href="${p.obsidianUrl}" onclick="event.stopPropagation()" class="mono text-[9px] px-2 py-0.5 border border-[#a88bfa]/30 text-[#a88bfa] hover:border-[#a88bfa] transition-colors">NOTE</a>`
+                    : '';
+
+                // Action buttons
+                let actions;
+                if (isLocal) {
+                    const safePath = p.path.replace(/'/g, "\\'");
+                    actions = `
+                        <a href="vscode://file/${encodeURIComponent(p.path)}" onclick="event.stopPropagation()" class="mono text-[9px] px-2 py-0.5 border border-outline-variant ${hb} transition-colors">IDE</a>
+                        <button onclick="event.stopPropagation(); openInTerminal('claude', '${safePath}')" class="mono text-[9px] px-2 py-0.5 border border-outline-variant ${hb} transition-colors ${p.agentUsed === 'claude' ? tc + ' border-current' : ''}">CLAUDE</button>
+                        <button onclick="event.stopPropagation(); openInTerminal('codex', '${safePath}')" class="mono text-[9px] px-2 py-0.5 border border-outline-variant ${hb} transition-colors ${p.agentUsed === 'codex' ? tc + ' border-current' : ''}">CODEX</button>
+                        ${noteBtn}
+                    `;
+                } else if (isObsidian) {
+                    actions = `
+                        ${p.obsidianUrl ? `<a href="${p.obsidianUrl}" onclick="event.stopPropagation()" class="mono text-[9px] px-2 py-0.5 border border-[#a88bfa]/30 text-[#a88bfa] hover:border-[#a88bfa] transition-colors">OPEN</a>` : ''}
+                    `;
+                } else {
+                    actions = `
+                        <a href="${p.path}" target="_blank" onclick="event.stopPropagation()" class="mono text-[9px] px-2 py-0.5 border border-outline-variant ${hb} transition-colors">OPEN</a>
+                        <button onclick="event.stopPropagation(); copyToClipboard('git clone ${p.remoteUrl || p.path}')" class="mono text-[9px] px-2 py-0.5 border border-outline-variant ${hb} transition-colors">CLONE</button>
+                        ${noteBtn}
+                    `;
+                }
+
+                // Dirty icon with click handler
+                const dirtyIcon = isDirty
+                    ? `<span class="material-symbols-outlined text-error glow-critical text-[14px] flex-shrink-0 cursor-pointer" onclick="event.stopPropagation(); showDirtyFiles('${p.path.replace(/'/g, "\\'")}', this)">warning</span>`
+                    : `<div class="w-1.5 h-1.5 rounded-full ${dc} flex-shrink-0"></div>`;
+
+                return `
+                <div class="flex items-center justify-between p-3 bg-surface obsidian-border hover:bg-surface-variant group cursor-pointer transition-colors ${dirtyBorder}" onclick="rowClick(window._filteredProjects[${idx}])">
+                    <div class="flex items-center gap-4 min-w-0 flex-1">
+                        ${dirtyIcon}
+                        <div class="min-w-0 flex-1">
+                            <h3 class="mono text-[11px] font-bold ${isDirty ? 'text-error' : 'text-on-surface'} leading-none mb-1 truncate">${escapeHtml(p.name.toUpperCase())}</h3>
+                            <div class="flex items-center gap-1.5 mono text-[9px] text-on-surface-variant flex-wrap">
+                                ${branchTag}
+                                ${p.lastCommit ? `<span class="truncate max-w-[200px]">${escapeHtml(p.lastCommit)}</span>` : ''}
+                                ${(branchTag || p.lastCommit) && (techTags || agentTag) ? '<span>·</span>' : ''}
+                                <div class="flex gap-1 flex-wrap">
+                                    <span class="px-1 border border-outline-variant ${tc}">${p.project_type}</span>
+                                    ${agentTag}
+                                    ${techTags}
+                                    ${isDirty ? '<span class="px-1 border border-error/30 text-error">DIRTY</span>' : ''}
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="flex gap-1.5 opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0 ml-4">
+                        ${actions}
+                    </div>
+                </div>`;
+            }).join('');
+        }
+
+        document.getElementById('showing-count').textContent = filtered.length;
+    }
+
+    // Sidebar filter clicks
+    document.querySelectorAll('.filter-link').forEach(link => {
+        link.addEventListener('click', () => {
+            document.querySelectorAll('.filter-link').forEach(l => {
+                l.classList.remove('text-primary', 'bg-surface-variant/50', 'active');
+                l.classList.add('text-on-surface-variant');
+            });
+            link.classList.add('text-primary', 'bg-surface-variant/50', 'active');
+            link.classList.remove('text-on-surface-variant');
+            currentFilter = link.dataset.filter;
+            renderProjects();
+        });
+    });
+
+    document.getElementById('search').addEventListener('input', renderProjects);
+    document.getElementById('sort').addEventListener('change', renderProjects);
+    document.getElementById('tech-filter').addEventListener('change', renderProjects);
+    document.getElementById('settings-modal').addEventListener('click', e => { if (e.target === e.currentTarget) closeSettings(); });
+
+    // Keyboard shortcut: / to focus search
+    document.addEventListener('keydown', e => {
+        if (e.key === '/' && document.activeElement.tagName !== 'INPUT' && document.activeElement.tagName !== 'TEXTAREA') {
+            e.preventDefault();
+            document.getElementById('search').focus();
+        }
+    });
+
+    // Load data
+    fetch('/api/map')
+        .then(r => r.json())
+        .then(data => {
+            projects = data;
+            document.getElementById('total-count').textContent = projects.length;
+            document.getElementById('count-all').textContent = projects.length;
+            document.getElementById('count-git').textContent = projects.filter(p => p.project_type === 'Git').length;
+            document.getElementById('count-github').textContent = projects.filter(p => p.project_type === 'GitHub').length;
+            document.getElementById('count-gitlab').textContent = projects.filter(p => p.project_type === 'GitLab').length;
+            document.getElementById('count-idea').textContent = projects.filter(p => p.project_type === 'Idea').length;
+            document.getElementById('count-folder').textContent = projects.filter(p => p.project_type === 'Folder').length;
+            document.getElementById('count-obsidian').textContent = projects.filter(p => p.project_type === 'Obsidian').length;
+            const dc = projects.filter(p => p.gitStatus === 'uncommitted').length;
+            document.getElementById('count-dirty').textContent = dc;
+            document.getElementById('count-dirty-side').textContent = dc;
+            renderProjects();
+        })
+        .catch(() => {
+            document.getElementById('map').innerHTML = '<div class="text-center py-16 mono text-sm text-on-surface-variant">ERROR: RUN "mercator survey" FIRST</div>';
+        });
+</script>
+</body>
+</html>

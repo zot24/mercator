@@ -1,0 +1,25 @@
+# Mercator Configuration
+# Copy this to ~/.config/mercator.toml (Linux) or ~/Library/Application Support/mercator.toml (macOS)
+# or use the --config flag: mercator serve --config myconfig.toml
+
+# Default path to survey (when no path is provided)
+# survey_path = "~/Desktop/code"
+
+# Default output file for survey results
+# output = "mercator_map.json"
+
+# Default port for the server
+# port = 3000
+
+# Default bind address (use 0.0.0.0 for network access)
+# bind = "127.0.0.1"
+
+# Default map file
+# map_file = "mercator_map.json"
+
+# Obsidian vault integration
+# [obsidian]
+# vault_path = "~/Desktop/brain"
+# projects_folder = "Projects"
+# vault_name = "brain"
+# sync_before_scan = false

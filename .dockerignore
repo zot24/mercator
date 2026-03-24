@@ -1,0 +1,7 @@
+target/
+mercator_map.json
+.git/
+.gitignore
+CLAUDE.md
+*.md
+!dist/
