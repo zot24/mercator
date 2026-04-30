@@ -1,3 +1,4 @@
 /target
 mercator_map.json
 .swarm/
+.claude/

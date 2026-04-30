@@ -73,7 +73,8 @@
         </nav>
     </div>
     <div class="flex items-center gap-3">
-        <button onclick="refreshSurvey()" class="material-symbols-outlined text-on-surface-variant hover:text-on-surface transition-colors text-[16px]" title="Refresh"><span id="refresh-icon">sync</span></button>
+        <button onclick="recategorize()" class="material-symbols-outlined text-on-surface-variant hover:text-on-surface transition-colors text-[16px]" title="Re-categorize projects from current map"><span id="recat-icon">sell</span></button>
+        <button onclick="refreshSurvey()" class="material-symbols-outlined text-on-surface-variant hover:text-on-surface transition-colors text-[16px]" title="Reload page"><span id="refresh-icon">sync</span></button>
         <button onclick="openSettings()" class="material-symbols-outlined text-on-surface-variant hover:text-on-surface transition-colors text-[16px]" title="Settings">settings</button>
     </div>
 </header>
@@ -137,6 +138,19 @@
             </div>
             <span class="text-[9px] text-error" id="count-dirty-side">0</span>
         </a>
+        <a class="filter-link flex items-center justify-between text-on-surface-variant p-2 hover:bg-surface-variant rounded-sm mb-1 cursor-pointer transition-colors" data-filter="favorites">
+            <div class="flex items-center gap-2">
+                <span class="material-symbols-outlined text-[16px]" style="font-variation-settings: 'FILL' 1, 'wght' 300;">star</span>
+                <span>FAVORITES</span>
+            </div>
+            <span class="text-[9px] text-claude-orange" id="count-favorites">0</span>
+        </a>
+        <div class="mt-3 mb-1 border-t border-outline-variant pt-3"></div>
+        <div class="flex items-center justify-between px-2 mb-1">
+            <span class="mono text-[9px] text-on-surface-variant uppercase">CATEGORIES</span>
+            <button onclick="recategorize()" class="material-symbols-outlined text-on-surface-variant hover:text-primary text-[12px] transition-colors" title="Re-categorize">refresh</button>
+        </div>
+        <div id="category-list" class="mb-2"></div>
         <div class="mt-3 mb-1 border-t border-outline-variant pt-3"></div>
         <a class="filter-link flex items-center justify-between text-on-surface-variant p-2 hover:bg-surface-variant rounded-sm mb-1 cursor-pointer transition-colors" data-filter="agents" onclick="showAgentsView()">
             <div class="flex items-center gap-2">
@@ -347,6 +361,23 @@
     let agentJobs = [];
     let agentPollTimer = null;
 
+    // Favorites — keyed by project path (stable, unique)
+    function loadFavorites() {
+        try { return new Set(JSON.parse(localStorage.getItem('mercator-favorites') || '[]')); }
+        catch { return new Set(); }
+    }
+    function saveFavorites(s) { localStorage.setItem('mercator-favorites', JSON.stringify([...s])); }
+    let favorites = loadFavorites();
+
+    function isFav(p) { return favorites.has(p.path); }
+    function toggleFavorite(path, ev) {
+        if (ev) ev.stopPropagation();
+        if (favorites.has(path)) favorites.delete(path); else favorites.add(path);
+        saveFavorites(favorites);
+        renderProjects();
+        updateCounts();
+    }
+
     function escapeHtml(str) {
         const div = document.createElement('div');
         div.textContent = str;
@@ -476,6 +507,64 @@
     }
 
     function refreshSurvey() { document.getElementById('refresh-icon').textContent = 'hourglass_empty'; location.reload(); }
+
+    // ── Categories & Recategorize ─────────────────────────────
+    function recategorize() {
+        const icon = document.getElementById('recat-icon');
+        if (icon) icon.textContent = 'hourglass_empty';
+        fetch('/api/categorize', { method: 'POST' })
+            .then(r => r.json())
+            .then(data => {
+                if (!data.ok) { showToast('CATEGORIZE FAILED: ' + (data.error || 'unknown'), true); return; }
+                showToast(`RETAGGED: ${data.tagged}/${data.projects}`);
+                return fetch('/api/map').then(r => r.json()).then(map => {
+                    projects = map;
+                    renderCategoryList();
+                    renderProjects();
+                    updateCounts();
+                });
+            })
+            .catch(e => showToast('ERROR: ' + e, true))
+            .finally(() => { if (icon) icon.textContent = 'sell'; });
+    }
+
+    function selectFilter(filter) {
+        currentFilter = filter;
+        document.querySelectorAll('.filter-link').forEach(l => {
+            const isActive = l.dataset.filter === filter;
+            l.classList.toggle('text-primary', isActive);
+            l.classList.toggle('bg-surface-variant/50', isActive);
+            l.classList.toggle('active', isActive);
+            l.classList.toggle('text-on-surface-variant', !isActive);
+        });
+        hideAgentsView();
+        renderProjects();
+        if (currentView === 'graph' && graphData) renderGraph(graphData);
+    }
+
+    function renderCategoryList() {
+        const counts = {};
+        projects.forEach(p => (p.tags || []).forEach(t => { counts[t] = (counts[t] || 0) + 1; }));
+        const entries = Object.entries(counts).sort((a, b) => b[1] - a[1]);
+        const container = document.getElementById('category-list');
+        if (entries.length === 0) {
+            container.innerHTML = '<div class="px-2 mono text-[9px] text-outline italic">No categories yet</div>';
+            return;
+        }
+        container.innerHTML = entries.map(([cat, n]) => `
+            <a class="filter-link flex items-center justify-between text-on-surface-variant p-2 hover:bg-surface-variant rounded-sm mb-px cursor-pointer transition-colors" data-filter="cat:${cat}" onclick="selectFilter('cat:${cat}')">
+                <div class="flex items-center gap-2">
+                    <span class="w-1.5 h-1.5 rounded-full bg-secondary"></span>
+                    <span>${escapeHtml(cat.toUpperCase())}</span>
+                </div>
+                <span class="text-[9px]">${n}</span>
+            </a>
+        `).join('');
+    }
+
+    function updateCounts() {
+        document.getElementById('count-favorites').textContent = projects.filter(p => isFav(p)).length;
+    }
 
     // ── Agent Management ──────────────────────────────────────
     function openLaunchModal(projectPath, projectName) {
@@ -628,6 +717,11 @@
             const matchesSearch = p.name.toLowerCase().includes(searchTerm) || (p.description || '').toLowerCase().includes(searchTerm);
             let matchesFilter = currentFilter === 'all' || p.project_type === currentFilter;
             if (currentFilter === 'dirty') matchesFilter = p.gitStatus === 'uncommitted';
+            else if (currentFilter === 'favorites') matchesFilter = isFav(p);
+            else if (currentFilter && currentFilter.startsWith('cat:')) {
+                const cat = currentFilter.slice(4);
+                matchesFilter = (p.tags || []).includes(cat);
+            }
             const matchesTech = !techFilter || (p.techStack && p.techStack.includes(techFilter));
             return matchesSearch && matchesFilter && matchesTech;
         });
@@ -659,6 +753,14 @@
                 const techTags = (p.techStack || []).slice(0, 3).map(t =>
                     `<span class="px-1 border border-outline-variant">${escapeHtml(t)}</span>`
                 ).join('');
+
+                // Category tags (auto-tagged by backend)
+                const catTags = (p.tags || []).slice(0, 4).map(t =>
+                    `<span class="px-1 border border-secondary/30 text-secondary cursor-pointer" onclick="event.stopPropagation(); selectFilter('cat:${t}')">${escapeHtml(t)}</span>`
+                ).join('');
+
+                // Favorite star
+                const favBtn = `<button onclick="toggleFavorite('${p.path.replace(/'/g, "\\'")}', event)" class="material-symbols-outlined text-[14px] flex-shrink-0 transition-colors ${isFav(p) ? 'text-claude-orange' : 'text-on-surface-variant hover:text-claude-orange'}" style="${isFav(p) ? "font-variation-settings: 'FILL' 1, 'wght' 400;" : ''}" title="${isFav(p) ? 'Unfavorite' : 'Favorite'}">star</button>`;
 
                 // Branch display
                 const branchTag = p.gitBranch
@@ -704,17 +806,19 @@
                 return `
                 <div class="flex items-center justify-between p-3 bg-surface obsidian-border hover:bg-surface-variant group cursor-pointer transition-colors ${dirtyBorder}" onclick="rowClick(window._filteredProjects[${idx}])">
                     <div class="flex items-center gap-4 min-w-0 flex-1">
+                        ${favBtn}
                         ${dirtyIcon}
                         <div class="min-w-0 flex-1">
                             <h3 class="mono text-[11px] font-bold ${isDirty ? 'text-error' : 'text-on-surface'} leading-none mb-1 truncate">${escapeHtml(p.name.toUpperCase())}</h3>
                             <div class="flex items-center gap-1.5 mono text-[9px] text-on-surface-variant flex-wrap">
                                 ${branchTag}
                                 ${p.lastCommit ? `<span class="truncate max-w-[200px]">${escapeHtml(p.lastCommit)}</span>` : ''}
-                                ${(branchTag || p.lastCommit) && (techTags || agentTag) ? '<span>·</span>' : ''}
+                                ${(branchTag || p.lastCommit) && (techTags || agentTag || catTags) ? '<span>·</span>' : ''}
                                 <div class="flex gap-1 flex-wrap">
                                     <span class="px-1 border border-outline-variant ${tc}">${p.project_type}</span>
                                     ${agentTag}
                                     ${techTags}
+                                    ${catTags}
                                     ${isDirty ? '<span class="px-1 border border-error/30 text-error cursor-help" title="Uncommitted changes — click the warning icon to see changed files">DIRTY</span>' : ''}
                                 </div>
                             </div>
@@ -824,6 +928,11 @@
             const matchesSearch = !searchTerm || n.name.toLowerCase().includes(searchTerm) || (n.description || '').toLowerCase().includes(searchTerm);
             let matchesFilter = currentFilter === 'all' || n.type === currentFilter;
             if (currentFilter === 'dirty') return;
+            else if (currentFilter === 'favorites') matchesFilter = favorites.has(n.path);
+            else if (currentFilter && currentFilter.startsWith('cat:')) {
+                const cat = currentFilter.slice(4);
+                matchesFilter = (n.tags || []).includes(cat);
+            }
             const matchesTech = !techFilter || (n.tech && n.tech.includes(techFilter));
             if (matchesSearch && matchesFilter && matchesTech) visibleIds.add(n.id);
         });
@@ -1010,6 +1119,8 @@
             const dc = projects.filter(p => p.gitStatus === 'uncommitted').length;
             document.getElementById('count-dirty').textContent = dc;
             document.getElementById('count-dirty-side').textContent = dc;
+            renderCategoryList();
+            updateCounts();
             renderProjects();
         })
         .catch(() => {

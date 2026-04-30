@@ -1048,6 +1048,23 @@ struct AppState {
     map_file: PathBuf,
 }
 
+/// API endpoint: re-run auto-categorization against the existing map and save it
+async fn recategorize_api(
+    State(state): State<AppState>,
+) -> Json<serde_json::Value> {
+    let mut projects = match load_map(&state.map_file) {
+        Ok(p) => p,
+        Err(e) => return Json(serde_json::json!({ "ok": false, "error": e })),
+    };
+    auto_tag_projects(&mut projects);
+    if let Err(e) = save_map(&projects, &state.map_file) {
+        return Json(serde_json::json!({ "ok": false, "error": e }));
+    }
+    let count = projects.len();
+    let tagged = projects.iter().filter(|p| !p.tags.is_empty()).count();
+    Json(serde_json::json!({ "ok": true, "projects": count, "tagged": tagged }))
+}
+
 #[derive(Deserialize)]
 struct AgentRunRequest {
     project_path: String,
@@ -1400,6 +1417,7 @@ async fn main() {
                 .route("/api/agent/jobs", get(agent_jobs))
                 .route("/api/agent/job/{id}", get(agent_job_detail))
                 .route("/api/agent/job/{id}/log", get(agent_job_log))
+                .route("/api/categorize", post(recategorize_api))
                 .with_state(app_state)
                 .fallback_service(ServeDir::new("dist"));
 
