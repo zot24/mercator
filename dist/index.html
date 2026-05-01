@@ -413,7 +413,17 @@
             </div>
         </div>
         <div class="flex flex-1 min-h-0">
+            <!-- Projects pane -->
+            <div class="w-56 border-r border-outline-variant bg-surface-dim flex flex-col flex-shrink-0">
+                <div class="px-2 py-1.5 border-b border-outline-variant flex-shrink-0">
+                    <input id="preview-project-filter" type="text" placeholder="Filter projects…"
+                        class="w-full bg-surface border border-outline-variant focus:border-primary/50 focus:ring-0 text-on-surface text-[10px] mono placeholder:text-outline py-1 px-2 transition-colors"/>
+                </div>
+                <div id="preview-project-list" class="flex-1 overflow-y-auto custom-scrollbar mono text-[11px] py-1"></div>
+            </div>
+            <!-- Tree pane -->
             <div id="preview-tree" class="w-72 border-r border-outline-variant overflow-y-auto custom-scrollbar bg-surface-dim mono text-[11px] py-2 flex-shrink-0"></div>
+            <!-- Viewer pane -->
             <div class="flex-1 flex flex-col min-w-0">
                 <div id="preview-file-meta" class="px-3 py-1.5 border-b border-outline-variant mono text-[9px] text-on-surface-variant flex-shrink-0">—</div>
                 <div id="preview-content" class="flex-1 overflow-y-auto custom-scrollbar p-4"></div>
@@ -517,12 +527,51 @@
         }
     }
 
-    // ── Project Preview ────────────────────────────────────────
+    // ── Project Preview / Explorer ────────────────────────────────
     let previewProject = null;
     let previewActiveEl = null;
 
     function openPreview(p) {
+        const m = document.getElementById('preview-modal');
+        m.classList.remove('hidden');
+        renderPreviewProjectList();
+        switchPreviewProject(p);
+    }
+
+    function renderPreviewProjectList() {
+        const term = (document.getElementById('preview-project-filter').value || '').toLowerCase();
+        const local = projects.filter(p => ['Git', 'Folder', 'Idea'].includes(p.project_type));
+        const filtered = local.filter(p => !term
+            || p.name.toLowerCase().includes(term)
+            || (p.description || '').toLowerCase().includes(term));
+        const sorted = sortProjects(filtered, 'name-asc');
+        const container = document.getElementById('preview-project-list');
+        if (sorted.length === 0) {
+            container.innerHTML = '<div class="px-3 py-4 text-center text-[9px] text-on-surface-variant">NO_MATCH</div>';
+            return;
+        }
+        container.innerHTML = sorted.map(p => {
+            const isActive = previewProject && previewProject.path === p.path;
+            const isDirty = p.gitStatus === 'uncommitted';
+            const dc = dotColor[p.project_type] || 'bg-outline';
+            const safePath = p.path.replace(/'/g, "\\'");
+            return `
+            <div class="flex items-center gap-2 px-2 py-1 cursor-pointer hover:bg-surface-variant ${isActive ? 'bg-surface-variant text-primary' : ''}"
+                 onclick='switchPreviewProjectByPath("${safePath}")'>
+                ${isDirty ? '<span class="w-1 h-1 rounded-full bg-error flex-shrink-0"></span>' : `<div class="w-1 h-1 rounded-full ${dc} flex-shrink-0"></div>`}
+                <span class="truncate ${isActive ? '' : (isDirty ? 'text-error' : 'text-on-surface')}">${escapeHtml(p.name)}</span>
+            </div>`;
+        }).join('');
+    }
+
+    function switchPreviewProjectByPath(path) {
+        const p = projects.find(p => p.path === path);
+        if (p) switchPreviewProject(p);
+    }
+
+    function switchPreviewProject(p) {
         previewProject = p;
+        previewActiveEl = null;
         document.getElementById('preview-title').textContent = p.name.toUpperCase();
         document.getElementById('preview-path').textContent = p.path;
         document.getElementById('preview-ide').href = 'vscode://file/' + encodeURIComponent(p.path);
@@ -530,13 +579,12 @@
         document.getElementById('preview-tree').innerHTML = '<div class="text-center py-8 text-on-surface-variant">LOADING…</div>';
         document.getElementById('preview-content').innerHTML = '';
         document.getElementById('preview-file-meta').textContent = '—';
-
-        const m = document.getElementById('preview-modal');
-        m.classList.remove('hidden');
+        renderPreviewProjectList();
 
         fetch('/api/project/tree?path=' + encodeURIComponent(p.path))
             .then(r => r.json())
             .then(data => {
+                if (previewProject !== p) return; // user already switched again
                 if (data.error) {
                     document.getElementById('preview-tree').innerHTML = `<div class="p-3 text-error mono text-[10px]">${escapeHtml(data.error)}</div>`;
                     return;
@@ -547,6 +595,7 @@
                     openPreviewFile(readme.path, readme.name);
                 } else {
                     document.getElementById('preview-content').innerHTML = '<div class="text-center py-16 mono text-[10px] text-on-surface-variant">SELECT A FILE</div>';
+                    document.getElementById('preview-file-meta').textContent = '—';
                 }
             });
     }
@@ -628,9 +677,29 @@
     }
 
     document.addEventListener('keydown', e => {
-        if (e.key === 'Escape' && !document.getElementById('preview-modal').classList.contains('hidden')) {
+        const previewOpen = !document.getElementById('preview-modal').classList.contains('hidden');
+        if (!previewOpen) return;
+        if (e.key === 'Escape') {
             closePreview();
+            return;
         }
+        if (document.activeElement && document.activeElement.tagName === 'INPUT') return;
+        if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+            e.preventDefault();
+            const term = (document.getElementById('preview-project-filter').value || '').toLowerCase();
+            const local = projects.filter(p => ['Git', 'Folder', 'Idea'].includes(p.project_type))
+                .filter(p => !term || p.name.toLowerCase().includes(term) || (p.description || '').toLowerCase().includes(term));
+            const sorted = sortProjects(local, 'name-asc');
+            const idx = previewProject ? sorted.findIndex(p => p.path === previewProject.path) : -1;
+            const next = e.key === 'ArrowDown'
+                ? sorted[(idx + 1) % sorted.length]
+                : sorted[(idx - 1 + sorted.length) % sorted.length];
+            if (next) switchPreviewProject(next);
+        }
+    });
+
+    document.addEventListener('input', e => {
+        if (e.target && e.target.id === 'preview-project-filter') renderPreviewProjectList();
     });
 
     async function showDirtyFiles(path, btnEl) {
