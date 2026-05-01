@@ -375,34 +375,10 @@ fn survey_projects(root: &Path) -> Vec<Project> {
         if path.is_dir() {
             let is_git = path.join(".git").exists();
             let idea_file = path.join("IDEA.md");
-            let readme_file = path.join("README.md");
 
             if is_git || idea_file.exists() {
-                let mut description = String::from("No description provided.");
-                let desc_path = if idea_file.exists() { idea_file } else { readme_file };
-                
-                if desc_path.exists() {
-                    if let Ok(content) = std::fs::read_to_string(&desc_path) {
-                        // Find the first non-empty, non-heading, non-HTML line as description
-                        description = content.lines()
-                            .map(|l| l.trim())
-                            .filter(|l| {
-                                !l.is_empty()
-                                    && !l.starts_with('#')
-                                    && !l.starts_with("![")
-                                    && !l.starts_with("---")
-                                    && !l.starts_with('<')
-                                    && !l.starts_with("[!")
-                            })
-                            .next()
-                            .unwrap_or("No description provided.")
-                            .to_string();
-                        // Strip markdown formatting like > blockquotes
-                        if description.starts_with('>') {
-                            description = description.trim_start_matches('>').trim().to_string();
-                        }
-                    }
-                }
+                let description = description_from_repo(path)
+                    .unwrap_or_else(|| "No description provided.".to_string());
 
                 let last_modified = entry.metadata().ok()
                     .and_then(|m| m.modified().ok())
@@ -625,29 +601,120 @@ async fn open_terminal(Json(req): Json<OpenTerminalRequest>) -> Json<OpenTermina
     }
 }
 
+/// Strip simple inline markdown: [text](url) → text, **x** → x, `x` → x
+fn strip_inline_md(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i] as char;
+        if c == '[' {
+            // [text](url) — keep text, skip url
+            if let Some(close_brk) = s[i..].find("](") {
+                let text_end = i + close_brk;
+                if let Some(close_par) = s[text_end + 2..].find(')') {
+                    out.push_str(&s[i + 1..text_end]);
+                    i = text_end + 2 + close_par + 1;
+                    continue;
+                }
+            }
+        } else if c == '*' || c == '_' {
+            // Skip emphasis markers (*, **, _, __)
+            i += 1;
+            while i < bytes.len() && (bytes[i] as char == c) { i += 1; }
+            continue;
+        } else if c == '`' {
+            i += 1;
+            continue;
+        }
+        out.push(c);
+        i += 1;
+    }
+    out
+}
+
+/// Extract a clean description paragraph from a markdown file.
+/// Tries to skip frontmatter, badges, headings, HTML blocks, callouts, and
+/// returns the first prose paragraph (joined to a single line) capped to ~240 chars.
+fn extract_md_description(path: &Path) -> Option<String> {
+    let content = std::fs::read_to_string(path).ok()?;
+    let mut lines: Vec<&str> = content.lines().collect();
+
+    // Strip YAML frontmatter: --- ... --- at the very top
+    if lines.first().map(|l| l.trim() == "---").unwrap_or(false) {
+        if let Some(end) = lines.iter().skip(1).position(|l| l.trim() == "---") {
+            lines.drain(0..=end + 1);
+        }
+    }
+
+    let is_skip = |line: &str| {
+        let t = line.trim();
+        t.is_empty()
+            || t.starts_with('#')
+            || t.starts_with("![")
+            || t.starts_with("---")
+            || t.starts_with("===")
+            || t.starts_with("```")
+            || t.starts_with('<')
+            || t.starts_with("[!")
+            || t.starts_with("- [")    // task lists / TOC
+            || t.starts_with("* [")
+            || (t.starts_with("[") && t.contains("]:")) // reference link defs
+    };
+
+    // Find first non-skipped line, then collect contiguous prose lines
+    let mut paragraph = String::new();
+    let mut started = false;
+    for line in lines.iter() {
+        let t = line.trim();
+        if !started {
+            if is_skip(t) { continue; }
+            started = true;
+        } else if t.is_empty() {
+            break;
+        } else if is_skip(t) {
+            // Mid-paragraph skip-line ends the paragraph
+            break;
+        }
+        // Strip blockquote and bullet prefixes
+        let t = t.trim_start_matches('>').trim();
+        let t = t.strip_prefix("- ").unwrap_or(t);
+        let t = t.strip_prefix("* ").unwrap_or(t);
+        if !paragraph.is_empty() { paragraph.push(' '); }
+        paragraph.push_str(t);
+    }
+
+    if paragraph.is_empty() { return None; }
+    let cleaned = strip_inline_md(&paragraph);
+    let cleaned = cleaned.trim();
+    if cleaned.is_empty() { return None; }
+
+    // Cap at ~240 chars on a word boundary
+    const MAX: usize = 240;
+    let final_str = if cleaned.chars().count() > MAX {
+        let mut end = cleaned.char_indices().nth(MAX).map(|(i, _)| i).unwrap_or(cleaned.len());
+        if let Some(space) = cleaned[..end].rfind(' ') { end = space; }
+        format!("{}…", &cleaned[..end])
+    } else {
+        cleaned.to_string()
+    };
+    Some(final_str)
+}
+
+/// Read description from a directory by checking common markdown files in priority order
+fn description_from_repo(path: &Path) -> Option<String> {
+    for name in &["IDEA.md", "README.md", "CLAUDE.md", "AGENTS.md"] {
+        let p = path.join(name);
+        if p.exists() {
+            if let Some(d) = extract_md_description(&p) { return Some(d); }
+        }
+    }
+    None
+}
+
 /// Read the first meaningful content line from a markdown file
 fn read_md_description(path: &Path) -> String {
-    if let Ok(content) = std::fs::read_to_string(path) {
-        content.lines()
-            .map(|l| l.trim())
-            .filter(|l| {
-                !l.is_empty()
-                    && !l.starts_with('#')
-                    && !l.starts_with("![")
-                    && !l.starts_with("---")
-                    && !l.starts_with('<')
-                    && !l.starts_with("[!")
-                    && !l.starts_with("- ")
-            })
-            .next()
-            .map(|s| {
-                let s = s.strip_prefix('>').map(|r| r.trim()).unwrap_or(s);
-                s.to_string()
-            })
-            .unwrap_or_else(|| "No description".to_string())
-    } else {
-        "No description".to_string()
-    }
+    extract_md_description(path).unwrap_or_else(|| "No description".to_string())
 }
 
 /// Percent-encode a string for use in obsidian:// URIs
