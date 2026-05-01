@@ -81,7 +81,7 @@
 
 <!-- SideNavBar -->
 <aside class="fixed left-0 top-0 h-full flex flex-col z-40 bg-surface-dim w-48 border-r border-outline-variant pt-10">
-    <nav class="flex-1 mono text-[11px] font-medium px-2 pt-3" id="sidebar-filters">
+    <nav class="flex-1 overflow-y-auto custom-scrollbar mono text-[11px] font-medium px-2 pt-3" id="sidebar-filters">
         <a class="filter-link active flex items-center justify-between text-primary bg-surface-variant/50 p-2 rounded-sm mb-1 cursor-pointer" data-filter="all">
             <div class="flex items-center gap-2">
                 <span class="material-symbols-outlined text-[16px]">apps</span>
@@ -146,12 +146,6 @@
             <span class="text-[9px] text-claude-orange" id="count-favorites">0</span>
         </a>
         <div class="mt-3 mb-1 border-t border-outline-variant pt-3"></div>
-        <div class="flex items-center justify-between px-2 mb-1">
-            <span class="mono text-[9px] text-on-surface-variant uppercase">CATEGORIES</span>
-            <button onclick="recategorize()" class="material-symbols-outlined text-on-surface-variant hover:text-primary text-[12px] transition-colors" title="Re-categorize">refresh</button>
-        </div>
-        <div id="category-list" class="mb-2"></div>
-        <div class="mt-3 mb-1 border-t border-outline-variant pt-3"></div>
         <a class="filter-link flex items-center justify-between text-on-surface-variant p-2 hover:bg-surface-variant rounded-sm mb-1 cursor-pointer transition-colors" data-filter="skills" onclick="showSkillsView()">
             <div class="flex items-center gap-2">
                 <span class="material-symbols-outlined text-[16px]">extension</span>
@@ -166,6 +160,12 @@
             </div>
             <span class="text-[9px]" id="count-agents"><span id="agents-pulse" class="hidden inline-block w-1.5 h-1.5 rounded-full bg-tertiary mr-1" style="animation: pulse 1.5s infinite"></span><span id="agents-count">0</span></span>
         </a>
+        <div class="mt-3 mb-1 border-t border-outline-variant pt-3"></div>
+        <div class="flex items-center justify-between px-2 mb-1">
+            <span class="mono text-[9px] text-on-surface-variant uppercase">CATEGORIES</span>
+            <button onclick="recategorize()" class="material-symbols-outlined text-on-surface-variant hover:text-primary text-[12px] transition-colors" title="Re-categorize">refresh</button>
+        </div>
+        <div id="category-list" class="mb-2"></div>
     </nav>
 
     <div class="border-t border-outline-variant p-2 mono text-[10px] space-y-2">
@@ -682,16 +682,30 @@
     function loadSkills() {
         const list = document.getElementById('skills-list');
         list.innerHTML = '<div class="text-center py-8 mono text-[10px] text-on-surface-variant">SCANNING…</div>';
-        fetch('/api/skills').then(r => r.json()).then(data => {
-            skills = data;
-            const used = skills.filter(s => s.projects.length > 0).length;
-            const globalOnly = skills.filter(s => s.has_global && !s.projects.length).length;
-            document.getElementById('count-skills').textContent = skills.length;
-            document.getElementById('skills-summary').textContent = `${skills.length} TOTAL · ${used} IN_PROJECTS · ${globalOnly} GLOBAL_ONLY`;
+        fetch('/api/skills').then(r => r.json()).then(groups => {
+            skills = groups;
+            const allSkills = groups.flatMap(g => g.skills);
+            const used = allSkills.filter(s => s.projects.length > 0).length;
+            const globalOnly = allSkills.filter(s => s.has_global && !s.projects.length).length;
+            document.getElementById('count-skills').textContent = allSkills.length;
+            document.getElementById('skills-summary').textContent = `${allSkills.length} TOTAL · ${groups.length} GROUPS · ${used} IN_PROJECTS · ${globalOnly} GLOBAL_ONLY`;
             renderSkills();
         }).catch(e => {
             list.innerHTML = `<div class="text-center py-8 mono text-[10px] text-error">FAILED: ${e}</div>`;
         });
+    }
+
+    const groupEmoji = {
+        'gsd': '🎯',
+        'core': '◇',
+        'claude-plugins-official': '📦',
+        'zot24-skills': '📦',
+        'agent': '🤖',
+        'marea': '🌊',
+    };
+    function emojiFor(g) {
+        if (groupEmoji[g.name]) return groupEmoji[g.name];
+        return g.repo_url ? '📦' : '◇';
     }
 
     function statusBadge(status) {
@@ -704,66 +718,85 @@
         return `<span class="px-1 border ${cls} mono text-[9px]">${status.toUpperCase()}</span>`;
     }
 
+    function renderSkillCard(s) {
+        const globalBadge = s.has_global
+            ? '<span class="px-1 border border-primary/40 text-primary mono text-[9px]">GLOBAL</span>'
+            : '<span class="px-1 border border-outline-variant text-on-surface-variant mono text-[9px]">LOCAL_ONLY</span>';
+        const versionBadge = s.version
+            ? `<span class="px-1 border border-outline-variant mono text-[9px]">v${escapeHtml(s.version)}</span>`
+            : '';
+        const divergedCount = s.projects.filter(u => u.status === 'diverged').length;
+        const updateBadge = divergedCount > 0
+            ? `<span class="px-1 border border-error/40 text-error mono text-[9px]" title="${divergedCount} project copies diverged from global">${divergedCount}_DIVERGED</span>`
+            : '';
+        const usages = s.projects.length > 0
+            ? `<div class="mt-2 flex flex-wrap gap-1">${s.projects.map(u => `
+                <a href="vscode://file/${encodeURIComponent(u.skill_path)}" onclick="event.stopPropagation()" class="inline-flex items-center gap-1 mono text-[9px] px-1.5 py-0.5 border border-outline-variant hover:border-primary transition-colors" title="${escapeHtml(u.skill_path)}">
+                    <span class="text-on-surface">${escapeHtml(u.project)}</span>
+                    ${statusBadge(u.status)}
+                </a>
+            `).join('')}</div>`
+            : '';
+        return `
+        <div class="p-3 bg-surface obsidian-border hover:bg-surface-variant transition-colors">
+            <div class="flex items-start justify-between gap-3">
+                <div class="min-w-0 flex-1">
+                    <div class="flex items-center gap-1.5 flex-wrap mb-1">
+                        <h3 class="mono text-[11px] font-bold text-on-surface leading-none">${escapeHtml(s.name)}</h3>
+                        ${globalBadge}
+                        ${versionBadge}
+                        ${updateBadge}
+                    </div>
+                    <p class="text-[10px] text-on-surface-variant leading-snug" style="display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden;">${escapeHtml(s.description || '—')}</p>
+                    ${usages}
+                </div>
+                <div class="mono text-[9px] text-on-surface-variant flex-shrink-0 text-right">
+                    ${s.projects.length > 0 ? `<div>${s.projects.length} PROJECT${s.projects.length === 1 ? '' : 'S'}</div>` : ''}
+                    ${s.global_path ? `<a href="vscode://file/${encodeURIComponent(s.global_path)}" class="hover:text-primary transition-colors" title="Open skill location">${escapeHtml(s.global_path.replace(/^.*\.claude/, '~/.claude'))}</a>` : ''}
+                </div>
+            </div>
+        </div>`;
+    }
+
+    function skillMatchesTab(s) {
+        if (skillTab === 'used') return s.projects.length > 0;
+        if (skillTab === 'global') return s.has_global && s.projects.length === 0;
+        return true;
+    }
+
+    function skillMatchesSearch(s, term) {
+        if (!term) return true;
+        return s.name.toLowerCase().includes(term)
+            || (s.description || '').toLowerCase().includes(term)
+            || s.projects.some(p => p.project.toLowerCase().includes(term));
+    }
+
     function renderSkills() {
         const list = document.getElementById('skills-list');
         const term = (document.getElementById('skills-search').value || '').toLowerCase();
-        let filtered = skills.filter(s => {
-            if (skillTab === 'used' && s.projects.length === 0) return false;
-            if (skillTab === 'global' && (!s.has_global || s.projects.length > 0)) return false;
-            if (term) {
-                return s.name.toLowerCase().includes(term)
-                    || (s.description || '').toLowerCase().includes(term)
-                    || s.projects.some(p => p.project.toLowerCase().includes(term));
-            }
-            return true;
-        });
 
-        if (filtered.length === 0) {
-            list.innerHTML = '<div class="text-center py-8 mono text-[10px] text-on-surface-variant">NO_SKILLS</div>';
-            return;
-        }
+        const groupsHtml = (skills || []).map(g => {
+            const filteredSkills = g.skills.filter(s => skillMatchesTab(s) && (skillMatchesSearch(s, term) || g.name.toLowerCase().includes(term)));
+            if (filteredSkills.length === 0) return '';
 
-        list.innerHTML = filtered.map(s => {
-            const globalBadge = s.has_global
-                ? '<span class="px-1 border border-primary/40 text-primary mono text-[9px]">GLOBAL</span>'
-                : '<span class="px-1 border border-outline-variant text-on-surface-variant mono text-[9px]">LOCAL_ONLY</span>';
-            const versionBadge = s.version
-                ? `<span class="px-1 border border-outline-variant mono text-[9px]">v${escapeHtml(s.version)}</span>`
+            const repoLink = g.repo_url
+                ? `<a href="${escapeHtml(g.repo_url)}" target="_blank" class="inline-flex items-center gap-1 mono text-[9px] text-primary hover:underline" title="${escapeHtml(g.repo_url)}">
+                       <span class="material-symbols-outlined text-[12px]">open_in_new</span>REPO
+                   </a>`
                 : '';
-            const divergedCount = s.projects.filter(u => u.status === 'diverged').length;
-            const updateBadge = divergedCount > 0
-                ? `<span class="px-1 border border-error/40 text-error mono text-[9px]" title="${divergedCount} project copies diverged from global">${divergedCount}_DIVERGED</span>`
-                : '';
-
-            const usages = s.projects.length > 0
-                ? `<div class="mt-2 flex flex-wrap gap-1">${s.projects.map(u => `
-                    <a href="vscode://file/${encodeURIComponent(u.skill_path)}" onclick="event.stopPropagation()" class="inline-flex items-center gap-1 mono text-[9px] px-1.5 py-0.5 border border-outline-variant hover:border-primary transition-colors" title="${escapeHtml(u.skill_path)}">
-                        <span class="text-on-surface">${escapeHtml(u.project)}</span>
-                        ${statusBadge(u.status)}
-                    </a>
-                `).join('')}</div>`
-                : '';
-
-            return `
-            <div class="p-3 bg-surface obsidian-border hover:bg-surface-variant transition-colors">
-                <div class="flex items-start justify-between gap-3">
-                    <div class="min-w-0 flex-1">
-                        <div class="flex items-center gap-1.5 flex-wrap mb-1">
-                            <h3 class="mono text-[11px] font-bold text-on-surface leading-none">${escapeHtml(s.name)}</h3>
-                            ${globalBadge}
-                            ${versionBadge}
-                            ${updateBadge}
-                        </div>
-                        <p class="text-[10px] text-on-surface-variant leading-snug" style="display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden;">${escapeHtml(s.description || '—')}</p>
-                        ${usages}
+            const header = `
+                <div class="flex items-center justify-between mt-4 mb-1.5 px-1">
+                    <div class="flex items-center gap-2">
+                        <span class="text-[14px]">${emojiFor(g)}</span>
+                        <span class="mono text-[10px] font-bold text-on-surface uppercase tracking-wider">${escapeHtml(g.name)}</span>
+                        <span class="mono text-[9px] text-on-surface-variant">${filteredSkills.length}${filteredSkills.length !== g.skills.length ? '/' + g.skills.length : ''}</span>
                     </div>
-                    <div class="mono text-[9px] text-on-surface-variant flex-shrink-0 text-right">
-                        ${s.projects.length > 0 ? `<div>${s.projects.length} PROJECT${s.projects.length === 1 ? '' : 'S'}</div>` : ''}
-                        ${s.global_path ? `<a href="vscode://file/${encodeURIComponent(s.global_path)}" class="hover:text-primary transition-colors" title="Open global skill">~/.claude/skills/${escapeHtml(s.name)}</a>` : ''}
-                    </div>
-                </div>
-            </div>`;
+                    ${repoLink}
+                </div>`;
+            return header + `<div class="flex flex-col gap-[2px]">${filteredSkills.map(renderSkillCard).join('')}</div>`;
         }).join('');
+
+        list.innerHTML = groupsHtml || '<div class="text-center py-8 mono text-[10px] text-on-surface-variant">NO_SKILLS</div>';
     }
 
     document.addEventListener('input', e => {
