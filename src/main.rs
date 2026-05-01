@@ -1366,6 +1366,162 @@ async fn agent_job_log(
     }
 }
 
+// ── Skills Inventory ───────────────────────────────────────────────────
+
+#[derive(Serialize)]
+struct SkillUsage {
+    project: String,
+    path: String,
+    skill_path: String,
+    hash: u64,
+    /// Status compared to the global copy: "synced", "diverged", or "no-global"
+    status: String,
+}
+
+#[derive(Serialize)]
+struct SkillEntry {
+    name: String,
+    description: String,
+    /// Frontmatter `version` if present
+    version: Option<String>,
+    /// True if a global copy exists at ~/.claude/skills/<name>/
+    has_global: bool,
+    global_hash: Option<u64>,
+    global_path: Option<String>,
+    /// Per-project usages (already includes global=false)
+    projects: Vec<SkillUsage>,
+}
+
+fn fnv_hash(content: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    content.hash(&mut h);
+    h.finish()
+}
+
+/// Parse YAML frontmatter from a SKILL.md file. Returns (name, description, version).
+fn parse_skill_frontmatter(content: &str) -> (Option<String>, Option<String>, Option<String>) {
+    let mut name = None;
+    let mut description = None;
+    let mut version = None;
+
+    let mut lines = content.lines();
+    if lines.next().map(|l| l.trim()) != Some("---") {
+        return (name, description, version);
+    }
+
+    for line in lines {
+        let trimmed = line.trim();
+        if trimmed == "---" { break; }
+        if let Some(rest) = trimmed.strip_prefix("name:") {
+            name = Some(rest.trim().trim_matches('"').trim_matches('\'').to_string());
+        } else if let Some(rest) = trimmed.strip_prefix("description:") {
+            description = Some(rest.trim().trim_matches('"').trim_matches('\'').to_string());
+        } else if let Some(rest) = trimmed.strip_prefix("version:") {
+            version = Some(rest.trim().trim_matches('"').trim_matches('\'').to_string());
+        }
+    }
+    (name, description, version)
+}
+
+/// Read a skill from a directory containing SKILL.md
+fn read_skill(skill_dir: &Path) -> Option<(String, String, Option<String>, u64)> {
+    let skill_md = skill_dir.join("SKILL.md");
+    let content = std::fs::read_to_string(&skill_md).ok()?;
+    let (name, desc, version) = parse_skill_frontmatter(&content);
+    let name = name.unwrap_or_else(|| {
+        skill_dir.file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "unknown".to_string())
+    });
+    let desc = desc.unwrap_or_default();
+    Some((name, desc, version, fnv_hash(&content)))
+}
+
+/// Scan a `.claude/skills` directory and return its skills
+fn scan_skills_dir(skills_root: &Path) -> Vec<(String, String, Option<String>, PathBuf, u64)> {
+    let mut results = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(skills_root) {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.is_dir() {
+                if let Some((name, desc, version, hash)) = read_skill(&p) {
+                    results.push((name, desc, version, p, hash));
+                }
+            }
+        }
+    }
+    results
+}
+
+async fn skills_api(State(state): State<AppState>) -> Json<Vec<SkillEntry>> {
+    use std::collections::HashMap;
+
+    // 1. Scan global skills
+    let home = dirs::home_dir().unwrap_or_default();
+    let global_root = home.join(".claude/skills");
+    let global = scan_skills_dir(&global_root);
+
+    // 2. For every project in the map, scan its .claude/skills directory
+    let mut entries: HashMap<String, SkillEntry> = HashMap::new();
+
+    for (name, desc, version, path, hash) in global {
+        entries.insert(name.clone(), SkillEntry {
+            name,
+            description: desc,
+            version,
+            has_global: true,
+            global_hash: Some(hash),
+            global_path: Some(path.to_string_lossy().into_owned()),
+            projects: Vec::new(),
+        });
+    }
+
+    let projects = load_map(&state.map_file).unwrap_or_default();
+    for project in projects.iter() {
+        if !matches!(project.project_type, ProjectType::Git | ProjectType::Folder | ProjectType::Idea) {
+            continue;
+        }
+        let pskills = PathBuf::from(&project.path).join(".claude/skills");
+        if !pskills.exists() { continue; }
+        for (name, desc, version, skill_path, hash) in scan_skills_dir(&pskills) {
+            let entry = entries.entry(name.clone()).or_insert_with(|| SkillEntry {
+                name: name.clone(),
+                description: desc.clone(),
+                version: version.clone(),
+                has_global: false,
+                global_hash: None,
+                global_path: None,
+                projects: Vec::new(),
+            });
+            // Prefer description from a copy that has one if entry's is empty
+            if entry.description.is_empty() && !desc.is_empty() {
+                entry.description = desc;
+            }
+            let status = match entry.global_hash {
+                Some(g) if g == hash => "synced",
+                Some(_) => "diverged",
+                None => "no-global",
+            }.to_string();
+            entry.projects.push(SkillUsage {
+                project: project.name.clone(),
+                path: project.path.clone(),
+                skill_path: skill_path.to_string_lossy().into_owned(),
+                hash,
+                status,
+            });
+        }
+    }
+
+    let mut list: Vec<SkillEntry> = entries.into_values().collect();
+    list.sort_by(|a, b| {
+        // Sort: skills with project usages first (descending count), then by name
+        b.projects.len().cmp(&a.projects.len())
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
+    Json(list)
+}
+
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
@@ -1485,6 +1641,7 @@ async fn main() {
                 .route("/api/agent/job/{id}", get(agent_job_detail))
                 .route("/api/agent/job/{id}/log", get(agent_job_log))
                 .route("/api/categorize", post(recategorize_api))
+                .route("/api/skills", get(skills_api))
                 .with_state(app_state)
                 .fallback_service(ServeDir::new("dist"));
 
