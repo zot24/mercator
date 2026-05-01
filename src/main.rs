@@ -1115,6 +1115,107 @@ struct AppState {
     map_file: PathBuf,
 }
 
+// ── Project Preview (file tree + viewer) ───────────────────────────────
+
+const PREVIEW_MAX_DEPTH: usize = 6;
+const PREVIEW_FILE_BYTES: u64 = 1024 * 1024;
+const PREVIEW_SKIP_DIRS: &[&str] = &[
+    "node_modules", ".git", "target", "__pycache__", ".venv", "venv", ".swarm", ".cache",
+];
+
+#[derive(Serialize)]
+struct FileNode {
+    name: String,
+    path: String,
+    is_dir: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    children: Option<Vec<FileNode>>,
+}
+
+fn walk_tree(p: &Path, depth: usize) -> Vec<FileNode> {
+    if depth >= PREVIEW_MAX_DEPTH { return Vec::new(); }
+    let Ok(entries) = std::fs::read_dir(p) else { return Vec::new(); };
+    let mut nodes: Vec<FileNode> = Vec::new();
+    for e in entries.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        if PREVIEW_SKIP_DIRS.contains(&name.as_str()) { continue; }
+        if name.starts_with('.')
+            && name != ".gitignore"
+            && name != ".env.example"
+            && name != ".github"
+        {
+            continue;
+        }
+        let path = e.path();
+        let is_dir = path.is_dir();
+        let children = if is_dir { Some(walk_tree(&path, depth + 1)) } else { None };
+        nodes.push(FileNode {
+            name,
+            path: path.to_string_lossy().into_owned(),
+            is_dir,
+            children,
+        });
+    }
+    nodes.sort_by(|a, b| {
+        b.is_dir.cmp(&a.is_dir)
+            .then(a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
+    nodes
+}
+
+#[derive(Deserialize)]
+struct TreeQuery { path: String }
+
+async fn project_tree_api(
+    axum::extract::Query(q): axum::extract::Query<TreeQuery>,
+) -> Json<serde_json::Value> {
+    let root = PathBuf::from(&q.path);
+    if !root.is_dir() {
+        return Json(serde_json::json!({ "error": "Not a directory" }));
+    }
+    let canonical_root = std::fs::canonicalize(&root)
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| q.path.clone());
+    let nodes = walk_tree(&root, 0);
+    Json(serde_json::json!({
+        "root": canonical_root,
+        "tree": nodes,
+    }))
+}
+
+#[derive(Deserialize)]
+struct FileQuery { root: String, path: String }
+
+async fn project_file_api(
+    axum::extract::Query(q): axum::extract::Query<FileQuery>,
+) -> Json<serde_json::Value> {
+    let root = match std::fs::canonicalize(&q.root) {
+        Ok(p) => p,
+        Err(_) => return Json(serde_json::json!({ "error": "Invalid root" })),
+    };
+    let file = match std::fs::canonicalize(&q.path) {
+        Ok(p) => p,
+        Err(_) => return Json(serde_json::json!({ "error": "File not found" })),
+    };
+    if !file.starts_with(&root) {
+        return Json(serde_json::json!({ "error": "Access denied (path traversal)" }));
+    }
+    let metadata = match std::fs::metadata(&file) {
+        Ok(m) => m,
+        Err(e) => return Json(serde_json::json!({ "error": format!("{}", e) })),
+    };
+    if metadata.is_dir() {
+        return Json(serde_json::json!({ "error": "Path is a directory" }));
+    }
+    if metadata.len() > PREVIEW_FILE_BYTES {
+        return Json(serde_json::json!({ "error": "File too large", "size": metadata.len() }));
+    }
+    match std::fs::read_to_string(&file) {
+        Ok(c) => Json(serde_json::json!({ "content": c, "size": metadata.len() })),
+        Err(_) => Json(serde_json::json!({ "error": "Binary or non-UTF8 file", "size": metadata.len() })),
+    }
+}
+
 /// Path to the purge blocklist that lives next to the map file
 fn purge_file_path(map_file: &Path) -> PathBuf {
     let parent = map_file.parent().unwrap_or_else(|| Path::new("."));
@@ -1900,6 +2001,8 @@ async fn main() {
                 .route("/api/project/purge", post(purge_project_api))
                 .route("/api/project/restore", post(restore_project_api))
                 .route("/api/purged", get(purged_list_api))
+                .route("/api/project/tree", get(project_tree_api))
+                .route("/api/project/file", get(project_file_api))
                 .with_state(app_state)
                 .fallback_service(ServeDir::new("dist"));
 

@@ -9,6 +9,7 @@
     <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet"/>
     <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap" rel="stylesheet"/>
     <script src="https://d3js.org/d3.v7.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
     <script>
       tailwind.config = {
         darkMode: "class",
@@ -56,6 +57,26 @@
         .custom-scrollbar::-webkit-scrollbar-thumb { background: #30363d; }
         select { background-image: none; }
         @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.3; } }
+        .prose-md { color: #c9d1d9; font-size: 13px; line-height: 1.55; }
+        .prose-md h1, .prose-md h2, .prose-md h3, .prose-md h4 { font-weight: 600; color: #f0f6fc; margin-top: 1.2em; margin-bottom: 0.5em; }
+        .prose-md h1 { font-size: 1.6em; border-bottom: 1px solid #30363d; padding-bottom: 0.2em; }
+        .prose-md h2 { font-size: 1.3em; border-bottom: 1px solid #30363d; padding-bottom: 0.2em; }
+        .prose-md h3 { font-size: 1.1em; }
+        .prose-md p { margin: 0.6em 0; }
+        .prose-md a { color: #58a6ff; text-decoration: none; }
+        .prose-md a:hover { text-decoration: underline; }
+        .prose-md code { background: #161b22; padding: 0.1em 0.4em; border-radius: 3px; font-family: 'JetBrains Mono', monospace; font-size: 0.9em; }
+        .prose-md pre { background: #010409; border: 1px solid #30363d; padding: 0.8em; border-radius: 4px; overflow-x: auto; margin: 0.8em 0; }
+        .prose-md pre code { background: transparent; padding: 0; }
+        .prose-md ul, .prose-md ol { padding-left: 1.5em; margin: 0.6em 0; }
+        .prose-md li { margin: 0.2em 0; }
+        .prose-md blockquote { border-left: 3px solid #30363d; padding-left: 1em; color: #8b949e; margin: 0.8em 0; }
+        .prose-md table { border-collapse: collapse; margin: 0.8em 0; }
+        .prose-md th, .prose-md td { border: 1px solid #30363d; padding: 0.4em 0.8em; }
+        .prose-md th { background: #161b22; }
+        .prose-md hr { border: none; border-top: 1px solid #30363d; margin: 1em 0; }
+        .tree-item { white-space: nowrap; }
+        .tree-item.active { background: #21262d; color: #58a6ff; }
     </style>
 </head>
 <body class="bg-surface text-on-surface custom-scrollbar overflow-hidden">
@@ -376,6 +397,31 @@
     <div id="skills-list" class="flex flex-col gap-[2px]"></div>
 </div>
 
+<!-- Project Preview Modal -->
+<div class="fixed inset-0 bg-black/85 hidden z-[1000] p-4" id="preview-modal" onclick="if(event.target===this) closePreview()">
+    <div class="bg-surface border border-outline-variant w-full h-full flex flex-col rounded-lg overflow-hidden" onclick="event.stopPropagation()">
+        <div class="flex items-center justify-between px-4 py-2 border-b border-outline-variant bg-surface-dim flex-shrink-0">
+            <div class="flex items-center gap-3 min-w-0">
+                <span class="material-symbols-outlined text-on-surface-variant text-[16px]">folder_open</span>
+                <h2 id="preview-title" class="mono text-[12px] font-bold text-primary"></h2>
+                <span id="preview-path" class="mono text-[9px] text-on-surface-variant truncate"></span>
+            </div>
+            <div class="flex items-center gap-2 flex-shrink-0">
+                <a id="preview-ide" target="_blank" class="mono text-[10px] px-2 py-1 border border-outline-variant hover:border-primary text-on-surface-variant hover:text-primary transition-colors">IDE</a>
+                <button id="preview-claude" class="mono text-[10px] px-2 py-1 border border-outline-variant hover:border-claude-orange text-on-surface-variant hover:text-claude-orange transition-colors">CLAUDE</button>
+                <button onclick="closePreview()" class="material-symbols-outlined text-on-surface-variant hover:text-on-surface text-[20px]">close</button>
+            </div>
+        </div>
+        <div class="flex flex-1 min-h-0">
+            <div id="preview-tree" class="w-72 border-r border-outline-variant overflow-y-auto custom-scrollbar bg-surface-dim mono text-[11px] py-2 flex-shrink-0"></div>
+            <div class="flex-1 flex flex-col min-w-0">
+                <div id="preview-file-meta" class="px-3 py-1.5 border-b border-outline-variant mono text-[9px] text-on-surface-variant flex-shrink-0">—</div>
+                <div id="preview-content" class="flex-1 overflow-y-auto custom-scrollbar p-4"></div>
+            </div>
+        </div>
+    </div>
+</div>
+
 <!-- Log Viewer Modal -->
 <div class="fixed inset-0 bg-black/80 hidden justify-center items-center z-[1000]" id="log-modal">
     <div class="bg-surface border border-outline-variant p-5 max-w-3xl w-[95%] max-h-[80vh] rounded-lg flex flex-col">
@@ -465,11 +511,127 @@
         if (p.project_type === 'Obsidian' && p.obsidianUrl) {
             window.location.href = p.obsidianUrl;
         } else if (isLocal) {
-            window.location.href = 'vscode://file/' + encodeURIComponent(p.path);
+            openPreview(p);
         } else {
             window.open(p.path, '_blank');
         }
     }
+
+    // ── Project Preview ────────────────────────────────────────
+    let previewProject = null;
+    let previewActiveEl = null;
+
+    function openPreview(p) {
+        previewProject = p;
+        document.getElementById('preview-title').textContent = p.name.toUpperCase();
+        document.getElementById('preview-path').textContent = p.path;
+        document.getElementById('preview-ide').href = 'vscode://file/' + encodeURIComponent(p.path);
+        document.getElementById('preview-claude').onclick = () => openInTerminal('claude', p.path);
+        document.getElementById('preview-tree').innerHTML = '<div class="text-center py-8 text-on-surface-variant">LOADING…</div>';
+        document.getElementById('preview-content').innerHTML = '';
+        document.getElementById('preview-file-meta').textContent = '—';
+
+        const m = document.getElementById('preview-modal');
+        m.classList.remove('hidden');
+
+        fetch('/api/project/tree?path=' + encodeURIComponent(p.path))
+            .then(r => r.json())
+            .then(data => {
+                if (data.error) {
+                    document.getElementById('preview-tree').innerHTML = `<div class="p-3 text-error mono text-[10px]">${escapeHtml(data.error)}</div>`;
+                    return;
+                }
+                renderPreviewTree(data.tree);
+                const readme = findReadme(data.tree);
+                if (readme) {
+                    openPreviewFile(readme.path, readme.name);
+                } else {
+                    document.getElementById('preview-content').innerHTML = '<div class="text-center py-16 mono text-[10px] text-on-surface-variant">SELECT A FILE</div>';
+                }
+            });
+    }
+
+    function closePreview() {
+        document.getElementById('preview-modal').classList.add('hidden');
+        previewProject = null;
+        previewActiveEl = null;
+    }
+
+    function findReadme(nodes) {
+        const names = ['readme.md', 'readme.mdx', 'idea.md', 'readme.txt', 'readme'];
+        for (const wanted of names) {
+            const hit = nodes.find(n => !n.is_dir && n.name.toLowerCase() === wanted);
+            if (hit) return hit;
+        }
+        return null;
+    }
+
+    function renderPreviewTree(nodes) {
+        function nodeHtml(n, level) {
+            const indent = level * 12;
+            if (n.is_dir) {
+                const id = 'tree-' + Math.random().toString(36).substring(2, 9);
+                const children = (n.children || []).map(c => nodeHtml(c, level + 1)).join('');
+                return `
+                    <div>
+                        <div class="tree-item flex items-center gap-1 hover:bg-surface-variant cursor-pointer px-2 py-0.5" style="padding-left:${4 + indent}px" onclick="toggleTreeFolder('${id}')">
+                            <span id="${id}-icon" class="material-symbols-outlined text-[12px] text-on-surface-variant">chevron_right</span>
+                            <span class="text-on-surface-variant">${escapeHtml(n.name)}</span>
+                        </div>
+                        <div id="${id}" class="hidden">${children}</div>
+                    </div>`;
+            }
+            const safePath = n.path.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+            const safeName = n.name.replace(/'/g, "\\'");
+            return `
+                <div class="tree-item flex items-center gap-1 hover:bg-surface-variant cursor-pointer px-2 py-0.5" style="padding-left:${20 + indent}px" onclick="openPreviewFile('${safePath}', '${safeName}', this)">
+                    <span class="text-on-surface">${escapeHtml(n.name)}</span>
+                </div>`;
+        }
+        document.getElementById('preview-tree').innerHTML = nodes.map(n => nodeHtml(n, 0)).join('') || '<div class="p-3 text-on-surface-variant mono text-[10px]">EMPTY</div>';
+    }
+
+    function toggleTreeFolder(id) {
+        const div = document.getElementById(id);
+        const icon = document.getElementById(id + '-icon');
+        const isHidden = div.classList.contains('hidden');
+        div.classList.toggle('hidden');
+        icon.textContent = isHidden ? 'expand_more' : 'chevron_right';
+    }
+
+    function openPreviewFile(path, name, el) {
+        if (!previewProject) return;
+        if (previewActiveEl) previewActiveEl.classList.remove('active');
+        if (el) { el.classList.add('active'); previewActiveEl = el; }
+
+        document.getElementById('preview-content').innerHTML = '<div class="text-center py-8 mono text-[10px] text-on-surface-variant">LOADING…</div>';
+        document.getElementById('preview-file-meta').textContent = name;
+
+        fetch('/api/project/file?root=' + encodeURIComponent(previewProject.path) + '&path=' + encodeURIComponent(path))
+            .then(r => r.json())
+            .then(data => {
+                if (data.error) {
+                    const sizeStr = data.size ? ` · ${data.size} bytes` : '';
+                    document.getElementById('preview-content').innerHTML = `<div class="text-error mono text-[10px] p-4">${escapeHtml(data.error)}${sizeStr}</div>`;
+                    return;
+                }
+                const lower = name.toLowerCase();
+                const isMd = lower.endsWith('.md') || lower.endsWith('.mdx');
+                if (isMd && window.marked) {
+                    const html = marked.parse(data.content);
+                    document.getElementById('preview-content').innerHTML = `<div class="prose-md max-w-3xl">${html}</div>`;
+                } else {
+                    document.getElementById('preview-content').innerHTML = `<pre class="mono text-[11px] text-on-surface whitespace-pre overflow-x-auto leading-relaxed">${escapeHtml(data.content)}</pre>`;
+                }
+                document.getElementById('preview-file-meta').textContent = `${name} · ${(data.size / 1024).toFixed(1)} KB`;
+            });
+    }
+
+    document.addEventListener('keydown', e => {
+        if (e.key === 'Escape' && !document.getElementById('preview-modal').classList.contains('hidden')) {
+            closePreview();
+        }
+    });
 
     async function showDirtyFiles(path, btnEl) {
         // Remove any existing popup
