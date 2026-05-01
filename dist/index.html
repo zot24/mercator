@@ -402,6 +402,25 @@
     let favorites = loadFavorites();
 
     function isFav(p) { return favorites.has(p.path); }
+
+    function purgeProject(path, name, ev) {
+        if (ev) ev.stopPropagation();
+        if (!confirm(`Purge "${name}" from the map?\n\nThis removes it from the dashboard and adds it to the blocklist so future surveys also skip it. The actual files on disk are NOT deleted.`)) return;
+        fetch('/api/project/purge', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ path }),
+        }).then(r => r.json()).then(data => {
+            if (!data.ok) { showToast('PURGE FAILED: ' + (data.error || 'unknown'), true); return; }
+            // Local cleanup so we don't refetch
+            projects = projects.filter(p => p.path.replace(/\/$/, '') !== path.replace(/\/$/, ''));
+            favorites.delete(path); saveFavorites(favorites);
+            renderCategoryList();
+            updateCounts();
+            renderProjects();
+            showToast(`PURGED — ${data.remaining} REMAIN`);
+        }).catch(e => showToast('ERROR: ' + e, true));
+    }
     function toggleFavorite(path, ev) {
         if (ev) ev.stopPropagation();
         if (favorites.has(path)) favorites.delete(path); else favorites.add(path);
@@ -964,6 +983,9 @@
                     ? `<a href="${p.obsidianUrl}" onclick="event.stopPropagation()" class="mono text-[9px] px-2 py-0.5 border border-[#a88bfa]/30 text-[#a88bfa] hover:border-[#a88bfa] transition-colors">NOTE</a>`
                     : '';
 
+                // Purge (trash) button — same for all types
+                const purgeBtn = `<button onclick="purgeProject('${p.path.replace(/'/g, "\\'")}', '${p.name.replace(/'/g, "\\'")}', event)" class="material-symbols-outlined text-[14px] px-1 text-on-surface-variant hover:text-error transition-colors" title="Purge from map (filesystem untouched)">delete</button>`;
+
                 // Action buttons
                 let actions;
                 if (isLocal) {
@@ -1013,8 +1035,9 @@
                             </div>
                         </div>
                     </div>
-                    <div class="flex gap-1.5 opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0 ml-4">
+                    <div class="flex gap-1.5 items-center opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0 ml-4">
                         ${actions}
+                        ${purgeBtn}
                     </div>
                 </div>`;
             }).join('');
@@ -1124,7 +1147,10 @@
             <div class="bg-surface obsidian-border border-l-2 ${bb} p-3 cursor-pointer hover:bg-surface-variant transition-colors flex flex-col gap-2 h-[150px]" onclick="rowClick(window._filteredProjects[${idx}])">
                 <div class="flex items-start justify-between gap-2">
                     <h3 class="mono text-[11px] font-bold ${isDirty ? 'text-error' : 'text-on-surface'} leading-tight truncate flex-1" title="${escapeHtml(p.name)}">${escapeHtml(p.name.toUpperCase())}</h3>
-                    <button onclick="toggleFavorite('${safePath}', event)" class="material-symbols-outlined text-[14px] flex-shrink-0 ${starColor}" style="${starFill}">star</button>
+                    <div class="flex items-center gap-1 flex-shrink-0">
+                        <button onclick="toggleFavorite('${safePath}', event)" class="material-symbols-outlined text-[14px] ${starColor}" style="${starFill}">star</button>
+                        <button onclick="purgeProject('${safePath}', '${p.name.replace(/'/g, "\\'")}', event)" class="material-symbols-outlined text-[14px] text-on-surface-variant hover:text-error transition-colors" title="Purge from map">delete</button>
+                    </div>
                 </div>
                 <p class="text-[10px] text-on-surface-variant leading-snug flex-1 overflow-hidden" style="display:-webkit-box; -webkit-line-clamp:3; -webkit-box-orient:vertical;">${escapeHtml(truncDesc || 'No description')}</p>
                 <div class="flex items-center gap-1 mono text-[9px] flex-wrap">

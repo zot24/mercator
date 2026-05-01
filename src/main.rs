@@ -1115,6 +1115,81 @@ struct AppState {
     map_file: PathBuf,
 }
 
+/// Path to the purge blocklist that lives next to the map file
+fn purge_file_path(map_file: &Path) -> PathBuf {
+    let parent = map_file.parent().unwrap_or_else(|| Path::new("."));
+    parent.join("mercator_purged.json")
+}
+
+fn read_purged(map_file: &Path) -> std::collections::HashSet<String> {
+    let path = purge_file_path(map_file);
+    let Ok(content) = std::fs::read_to_string(&path) else { return Default::default(); };
+    serde_json::from_str::<Vec<String>>(&content).unwrap_or_default().into_iter().collect()
+}
+
+fn write_purged(map_file: &Path, set: &std::collections::HashSet<String>) -> Result<(), String> {
+    let path = purge_file_path(map_file);
+    let mut list: Vec<&String> = set.iter().collect();
+    list.sort();
+    let json = serde_json::to_string_pretty(&list).map_err(|e| e.to_string())?;
+    std::fs::write(&path, &json).map_err(|e| format!("Failed to write {}: {}", path.display(), e))
+}
+
+#[derive(Deserialize)]
+struct PurgeRequest {
+    path: String,
+}
+
+async fn purge_project_api(
+    State(state): State<AppState>,
+    Json(req): Json<PurgeRequest>,
+) -> Json<serde_json::Value> {
+    let projects = match load_map(&state.map_file) {
+        Ok(p) => p,
+        Err(e) => return Json(serde_json::json!({ "ok": false, "error": e })),
+    };
+    let before = projects.len();
+    let target = req.path.trim_end_matches('/').to_string();
+    let kept: Vec<Project> = projects.into_iter()
+        .filter(|p| p.path.trim_end_matches('/') != target)
+        .collect();
+    let removed = before - kept.len();
+
+    let mut purged = read_purged(&state.map_file);
+    purged.insert(target.clone());
+    if let Err(e) = write_purged(&state.map_file, &purged) {
+        return Json(serde_json::json!({ "ok": false, "error": e }));
+    }
+    if let Err(e) = save_map(&kept, &state.map_file) {
+        return Json(serde_json::json!({ "ok": false, "error": e }));
+    }
+    Json(serde_json::json!({ "ok": true, "removed": removed, "remaining": kept.len(), "purged_total": purged.len() }))
+}
+
+async fn purged_list_api(State(state): State<AppState>) -> Json<Vec<String>> {
+    let mut list: Vec<String> = read_purged(&state.map_file).into_iter().collect();
+    list.sort();
+    Json(list)
+}
+
+#[derive(Deserialize)]
+struct RestoreRequest {
+    path: String,
+}
+
+async fn restore_project_api(
+    State(state): State<AppState>,
+    Json(req): Json<RestoreRequest>,
+) -> Json<serde_json::Value> {
+    let mut purged = read_purged(&state.map_file);
+    let target = req.path.trim_end_matches('/').to_string();
+    let removed = purged.remove(&target);
+    if let Err(e) = write_purged(&state.map_file, &purged) {
+        return Json(serde_json::json!({ "ok": false, "error": e }));
+    }
+    Json(serde_json::json!({ "ok": true, "removed_from_blocklist": removed, "remaining": purged.len() }))
+}
+
 /// API endpoint: re-run auto-categorization against the existing map and save it
 async fn recategorize_api(
     State(state): State<AppState>,
@@ -1742,6 +1817,12 @@ async fn main() {
                     all_projects.extend(obs_projects);
                 }
 
+                // Filter out purged paths so they stay gone across re-surveys
+                let purged = read_purged(&output);
+                let before_purge = all_projects.len();
+                all_projects.retain(|p| !purged.contains(p.path.trim_end_matches('/')));
+                let purged_count = before_purge - all_projects.len();
+
                 let before_dedup = all_projects.len();
                 let all_projects = deduplicate_projects(all_projects);
                 let mut all_projects = link_obsidian_notes(all_projects);
@@ -1757,9 +1838,9 @@ async fn main() {
                     let github_count = all_projects.iter().filter(|p| matches!(p.project_type, ProjectType::GitHub)).count();
                     let dirty_count = all_projects.iter().filter(|p| p.git_status.as_deref() == Some("uncommitted")).count();
 
-                    println!("[{}] {} projects ({} local, {} github, {} merged, {} dirty) -> {}",
+                    println!("[{}] {} projects ({} local, {} github, {} merged, {} purged, {} dirty) -> {}",
                         chrono::Local::now().format("%H:%M:%S"),
-                        all_projects.len(), local_count, github_count, merged, dirty_count,
+                        all_projects.len(), local_count, github_count, merged, purged_count, dirty_count,
                         output.display()
                     );
                 }
@@ -1816,6 +1897,9 @@ async fn main() {
                 .route("/api/agent/job/{id}/log", get(agent_job_log))
                 .route("/api/categorize", post(recategorize_api))
                 .route("/api/skills", get(skills_api))
+                .route("/api/project/purge", post(purge_project_api))
+                .route("/api/project/restore", post(restore_project_api))
+                .route("/api/purged", get(purged_list_api))
                 .with_state(app_state)
                 .fallback_service(ServeDir::new("dist"));
 
