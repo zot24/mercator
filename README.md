@@ -141,17 +141,23 @@ cargo build --release
 Scan a directory for projects and write results to JSON.
 
 ```bash
-mercator survey ~/code                          # Local only
-mercator survey ~/code --github zot24           # + GitHub repos
-mercator survey ~/code --gitlab myuser          # + GitLab repos
-mercator survey ~/code --github zot24 -w 5      # Re-scan every 5 minutes
-mercator survey ~/code -o custom_map.json       # Custom output file
+mercator survey ~/code                                    # Local only
+mercator survey ~/code --github zot24                     # + GitHub public repos (60/hr cap)
+mercator survey ~/code --github zot24 \
+  --github-token ghp_xxx                                  # + private repos, 5000/hr cap
+GITHUB_TOKEN=ghp_xxx mercator survey ~/code --github zot24  # Same via env
+mercator survey ~/code --gitlab myuser                    # + GitLab repos
+mercator survey ~/code --github zot24 --max-repos 1000    # Cap fetched repos
+mercator survey ~/code --github zot24 -w 5                # Re-scan every 5 minutes
 ```
 
 | Flag | Description |
 |------|-------------|
-| `--github <user>` | Fetch public repos from GitHub |
-| `--gitlab <user>` | Fetch public repos from GitLab |
+| `--github <user>` | Fetch repos from GitHub |
+| `--github-token <token>` | GitHub PAT (also reads `GITHUB_TOKEN` env). Required for private repos; raises rate limit from 60/hr to 5000/hr. |
+| `--gitlab <user>` | Fetch repos from GitLab |
+| `--gitlab-token <token>` | GitLab PAT (also reads `GITLAB_TOKEN` env) |
+| `--max-repos <n>` | Cap the number of repos fetched per remote source (default: no cap, paginates until done) |
 | `-o, --output <file>` | Output JSON file (default: `mercator_map.json`) |
 | `-w, --watch <minutes>` | Re-scan every N minutes (keeps running) |
 
