@@ -2,7 +2,9 @@
 
 > Cartography for your local development landscape
 
-Mercator is a Rust CLI tool and web dashboard that discovers, organizes, and visualizes all your development projects in one place. It scans local directories, GitHub, and GitLab accounts to build a comprehensive map of your project landscape.
+Mercator is a Rust CLI tool and web dashboard that discovers, organizes, and visualizes all your development projects in one place. It scans local directories, GitHub, GitLab, and an Obsidian vault to build a map of your project landscape.
+
+**Status: v0.1.x — early, single-user, breaking changes likely.** What ships today is local + GitHub + GitLab + Obsidian aggregation, an in-app explorer with file tree and README rendering, auto-tagging, a graph view, a skills inventory, project purge, and an opt-in Claude Code agent runner. What's described in *Why Mercator?* below as detecting deploy decay or exporting to markdown is **roadmap, not yet shipped** — see the [project board](https://github.com/users/zot24/projects/12) and [open issues](https://github.com/zot24/mercator/issues) for what's queued.
 
 ## Why Mercator?
 
@@ -77,17 +79,45 @@ maintenance cost is near zero.
 But you don't need to buy the long thesis to use Mercator. It earns its place
 the day it makes your existing project sprawl manageable.
 
-## Features
+## What ships today
 
-- **Local project scanning** — discovers Git repos, IDEA.md files, and folders
-- **Git metadata** — branch, last commit, dirty status
-- **Tech stack detection** — Node.js, Rust, Python, Go, Docker, and more
-- **GitHub/GitLab integration** — fetches public repos via API
-- **AI agent detection** — identifies projects using Claude Code or Codex (via CLAUDE.md, .claude, AGENTS.md, .codex)
-- **Deduplication** — merges local repos with their GitHub/GitLab counterparts
-- **Web dashboard** — dark-themed list UI with search, filters, and sorting
-- **One-click actions** — open in VS Code, Claude Code, or Codex directly from the dashboard
-- **Watch mode** — re-scan on an interval to keep the dashboard fresh
+**Discovery**
+- Local project scanning — Git repos, `IDEA.md` folders, top-level directories
+- Git metadata — branch, last commit, dirty/uncommitted-files detection (click the warning to see changed files)
+- Tech stack detection — Node.js, Rust, Python, Go, Docker, Ruby, Java, PHP, Elixir, …
+- GitHub / GitLab integration — public repos via API (currently capped at 50, unauthenticated)
+- Obsidian vault scan — pulls `Projects/` notes and the `@Projects.md` idea list, links them to matching repos by name
+- AI agent detection — identifies projects using Claude Code (`CLAUDE.md`, `.claude/`) or Codex (`AGENTS.md`, `.codex/`)
+- Deduplication — local Git repos merge with their GitHub/GitLab counterparts via remote URL or fallback name match
+
+**Organisation**
+- Auto-tagging into 15 categories (`ai`, `web`, `api`, `cli`, `devops`, `mobile`, `data`, `blockchain`, `seo`, `auth`, `bot`, `automation`, `game`, `docs`, `finance`)
+- Favorites (per-browser, persisted in `localStorage`)
+- Purge — remove a project from the map; persisted in `mercator_purged.json` so future surveys keep it gone
+- Smarter description extraction — reads `IDEA.md` → `README.md` → `CLAUDE.md` → `AGENTS.md`, strips frontmatter / badges / callouts, joins the first prose paragraph
+
+**Visualisation**
+- Three views: list, blocks (tile grid), graph (D3 force-directed)
+- Graph edges from name-mention, shared keywords, shared tags, and idea-↔-implementation links
+- Sidebar filters: type, dirty, favorites, dynamic categories
+- Real-time search, sort by name or last modified
+
+**In-app explorer**
+- Click any local project for a 3-pane preview: project list, file tree, viewer
+- Auto-opens `README.md` (or `IDEA.md` / `readme.txt`) with rendered markdown
+- Arrow keys + filter input swap projects without leaving the modal
+- IDE / Claude Code / Codex launch buttons per project
+
+**Skills inventory**
+- Walks `~/.claude/skills/` and every project's `.claude/skills/` plus the plugin marketplace cache
+- Groups by inferred prefix (e.g. all `gsd-*` collapse into one) or by marketplace name
+- Detects drift between project copies and the global copy via content hash (synced / diverged / no-global)
+- Repo links surfaced from `known_marketplaces.json` and from `repository:` in skill frontmatter
+
+**Agent runner** (opt-in, requires the `swarm` feature flag and a local `../swarm` checkout)
+- Launch a Claude Code task per project with prompt + model + permission mode + budget
+- Live job list with cost / tool-call / token counters
+- See [issue #21](https://github.com/zot24/mercator/issues/21) for the long-term distribution plan
 
 ## Quick Start
 
@@ -172,6 +202,19 @@ docker run -p 3000:3000 -v ~/code:/data/code:ro mercator \
 | **GitLab** | API | Public repos from GitLab user |
 | **Idea** | Local | Directories with `IDEA.md` |
 | **Folder** | Local | Top-level directories without Git |
+| **Obsidian** | Local | Notes and folders under a vault's `Projects/` directory |
+
+## Roadmap
+
+The promises in *Why Mercator?* that don't ship today live as tracked issues. The honest delta:
+
+- **"Stops me from losing projects"** — local + GitHub + GitLab + Obsidian work; **Vercel / Supabase / Turso don't exist yet** ([#8](https://github.com/zot24/mercator/issues/8))
+- **"Cuts the context-switch tax"** — file-tree explorer ships; **"where I left off" auto-opens README, not the file you actually had open** ([#19](https://github.com/zot24/mercator/issues/19))
+- **"Catches silent decay"** — dirty repos surface today; **stale ("sitting for three weeks") doesn't** ([#7](https://github.com/zot24/mercator/issues/7)); deploy / quota decay is gated on [#8](https://github.com/zot24/mercator/issues/8)
+- **"Tells me where to point AI"** — single-project agent launch works (with `--features swarm`); **cross-project landscape questioning** is [#20](https://github.com/zot24/mercator/issues/20)
+- **"Doesn't trap my data"** — **markdown export doesn't exist yet** ([#1](https://github.com/zot24/mercator/issues/1))
+
+Everything else is in the [project board](https://github.com/users/zot24/projects/12), grouped by phase.
 
 ## Tech Stack
 
