@@ -31,6 +31,7 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
+#[allow(clippy::large_enum_variant)] // CLI args parsed once at startup; size doesn't matter
 enum Commands {
     /// Survey a directory for projects
     Survey {
@@ -46,9 +47,23 @@ enum Commands {
         #[arg(long)]
         github: Option<String>,
 
+        /// GitHub personal access token (falls back to GITHUB_TOKEN env)
+        /// — required for private repos and lifts the unauthenticated 60/hr
+        /// rate limit to 5000/hr
+        #[arg(long, env = "GITHUB_TOKEN", hide_env_values = true)]
+        github_token: Option<String>,
+
         /// GitLab username to fetch repos from
         #[arg(long)]
         gitlab: Option<String>,
+
+        /// GitLab personal access token (falls back to GITLAB_TOKEN env)
+        #[arg(long, env = "GITLAB_TOKEN", hide_env_values = true)]
+        gitlab_token: Option<String>,
+
+        /// Cap the number of repos fetched per remote source (default: no cap)
+        #[arg(long)]
+        max_repos: Option<usize>,
 
         /// Re-scan every N minutes (runs in foreground)
         #[arg(short, long)]
@@ -221,52 +236,95 @@ fn format_api_error(
     out
 }
 
-/// Fetch repositories from GitHub API
-async fn fetch_github_repos(username: &str) -> Result<Vec<Project>, String> {
+/// Parse a GitHub `Link` header and return the URL with `rel="next"` if any.
+/// Pure function so it can be unit-tested without HTTP. The header looks like
+/// `<https://...?page=2>; rel="next", <https://...?page=20>; rel="last"`.
+fn parse_link_next(link_header: &str) -> Option<String> {
+    for part in link_header.split(',') {
+        let part = part.trim();
+        // Find the angle-bracketed URL and the rel attribute
+        let url = part.strip_prefix('<').and_then(|s| s.split_once('>'))?;
+        let (link_url, attrs) = url;
+        if attrs.contains("rel=\"next\"") {
+            return Some(link_url.to_string());
+        }
+    }
+    None
+}
+
+/// Fetch repositories from GitHub API. Paginates via `Link: rel="next"` and
+/// authenticates with a token if provided.
+async fn fetch_github_repos(
+    username: &str,
+    token: Option<&str>,
+    max_repos: Option<usize>,
+) -> Result<Vec<Project>, String> {
     let client = reqwest::Client::new();
-    let url = format!(
+    let mut next_url = Some(format!(
         "https://api.github.com/users/{}/repos?per_page=100&sort=pushed",
         username
-    );
+    ));
+    let mut all_repos: Vec<GitHubRepo> = Vec::new();
 
-    let response = client
-        .get(&url)
-        .header("User-Agent", "Mercator/1.0")
-        .header("Accept", "application/vnd.github.v3+json")
-        .send()
-        .await
-        .map_err(|e| format!("GitHub request failed: {}", e))?;
+    while let Some(url) = next_url.take() {
+        let mut req = client
+            .get(&url)
+            .header("User-Agent", "Mercator/1.0")
+            .header("Accept", "application/vnd.github.v3+json");
+        if let Some(t) = token {
+            req = req.header("Authorization", format!("Bearer {}", t));
+        }
+        let response = req
+            .send()
+            .await
+            .map_err(|e| format!("GitHub request failed: {}", e))?;
 
-    if !response.status().is_success() {
-        let status = response.status().as_u16();
-        let rate_remaining = response
+        if !response.status().is_success() {
+            let status = response.status().as_u16();
+            let rate_remaining = response
+                .headers()
+                .get("x-ratelimit-remaining")
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string);
+            let rate_reset = response
+                .headers()
+                .get("x-ratelimit-reset")
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string);
+            let body = response.text().await.unwrap_or_default();
+            return Err(format_api_error(
+                "GitHub",
+                status,
+                &body,
+                rate_remaining.as_deref(),
+                rate_reset.as_deref(),
+            ));
+        }
+
+        // Capture next-page link before consuming the response body
+        let link_header = response
             .headers()
-            .get("x-ratelimit-remaining")
+            .get("link")
             .and_then(|v| v.to_str().ok())
             .map(str::to_string);
-        let rate_reset = response
-            .headers()
-            .get("x-ratelimit-reset")
-            .and_then(|v| v.to_str().ok())
-            .map(str::to_string);
-        let body = response.text().await.unwrap_or_default();
-        return Err(format_api_error(
-            "GitHub",
-            status,
-            &body,
-            rate_remaining.as_deref(),
-            rate_reset.as_deref(),
-        ));
+
+        let mut page: Vec<GitHubRepo> = response
+            .json()
+            .await
+            .map_err(|e| format!("GitHub response was not a repo array: {}", e))?;
+
+        all_repos.append(&mut page);
+
+        if max_repos.is_some_and(|m| all_repos.len() >= m) {
+            break;
+        }
+        next_url = link_header.as_deref().and_then(parse_link_next);
     }
 
-    let repos: Vec<GitHubRepo> = response
-        .json()
-        .await
-        .map_err(|e| format!("GitHub response was not a repo array: {}", e))?;
-
-    let projects = repos
+    let take = max_repos.unwrap_or(usize::MAX);
+    let projects = all_repos
         .into_iter()
-        .take(50)
+        .take(take)
         .map(|repo| {
             let tech_stack = detect_github_tech_stack(&repo);
             Project {
@@ -321,35 +379,70 @@ fn detect_github_tech_stack(repo: &GitHubRepo) -> Vec<String> {
     stack
 }
 
-/// Fetch repositories from GitLab API
-async fn fetch_gitlab_repos(username: &str) -> Result<Vec<Project>, String> {
+/// Fetch repositories from GitLab API. Paginates via `x-next-page` header
+/// and authenticates with a token via the `PRIVATE-TOKEN` header.
+async fn fetch_gitlab_repos(
+    username: &str,
+    token: Option<&str>,
+    max_repos: Option<usize>,
+) -> Result<Vec<Project>, String> {
     let client = reqwest::Client::new();
-    let url = format!(
-        "https://gitlab.com/api/v4/users/{}/projects?per_page=50&order_by=pushed_at",
+    let base_url = format!(
+        "https://gitlab.com/api/v4/users/{}/projects?per_page=100&order_by=last_activity_at",
         username
     );
+    let mut page: u32 = 1;
+    let mut all_repos: Vec<GitLabRepo> = Vec::new();
 
-    let response = client
-        .get(&url)
-        .header("User-Agent", "Mercator/1.0")
-        .send()
-        .await
-        .map_err(|e| format!("GitLab request failed: {}", e))?;
+    loop {
+        let url = format!("{}&page={}", base_url, page);
+        let mut req = client.get(&url).header("User-Agent", "Mercator/1.0");
+        if let Some(t) = token {
+            req = req.header("PRIVATE-TOKEN", t);
+        }
+        let response = req
+            .send()
+            .await
+            .map_err(|e| format!("GitLab request failed: {}", e))?;
 
-    if !response.status().is_success() {
-        let status = response.status().as_u16();
-        let body = response.text().await.unwrap_or_default();
-        return Err(format_api_error("GitLab", status, &body, None, None));
+        if !response.status().is_success() {
+            let status = response.status().as_u16();
+            let body = response.text().await.unwrap_or_default();
+            return Err(format_api_error("GitLab", status, &body, None, None));
+        }
+
+        let next_page_hdr = response
+            .headers()
+            .get("x-next-page")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string);
+
+        let mut chunk: Vec<GitLabRepo> = response
+            .json()
+            .await
+            .map_err(|e| format!("GitLab response was not a repo array: {}", e))?;
+
+        if chunk.is_empty() {
+            break;
+        }
+        all_repos.append(&mut chunk);
+
+        if max_repos.is_some_and(|m| all_repos.len() >= m) {
+            break;
+        }
+
+        match next_page_hdr.as_deref() {
+            Some(next) if !next.is_empty() => {
+                page = next.parse().unwrap_or(page + 1);
+            }
+            _ => break,
+        }
     }
 
-    let repos: Vec<GitLabRepo> = response
-        .json()
-        .await
-        .map_err(|e| format!("GitLab response was not a repo array: {}", e))?;
-
-    let projects = repos
+    let take = max_repos.unwrap_or(usize::MAX);
+    let projects = all_repos
         .into_iter()
-        .take(50)
+        .take(take)
         .map(|repo| {
             let tech_stack = detect_gitlab_tech_stack(&repo);
             Project {
@@ -2469,7 +2562,10 @@ async fn main() {
             path,
             output,
             github,
+            github_token,
             gitlab,
+            gitlab_token,
+            max_repos,
             watch,
             obsidian,
             obsidian_folder,
@@ -2483,8 +2579,13 @@ async fn main() {
                 let local_count = all_projects.len();
 
                 if let Some(gh_user) = &github {
-                    eprintln!("Fetching GitHub repos for {}...", gh_user);
-                    match fetch_github_repos(gh_user).await {
+                    let auth_label = if github_token.is_some() {
+                        " (authenticated)"
+                    } else {
+                        " (unauthenticated, 60/hr cap)"
+                    };
+                    eprintln!("Fetching GitHub repos for {}{}...", gh_user, auth_label);
+                    match fetch_github_repos(gh_user, github_token.as_deref(), max_repos).await {
                         Ok(gh_repos) => {
                             eprintln!("  fetched {} GitHub repos", gh_repos.len());
                             all_projects.extend(gh_repos);
@@ -2496,8 +2597,13 @@ async fn main() {
                 }
 
                 if let Some(gl_user) = &gitlab {
-                    eprintln!("Fetching GitLab repos for {}...", gl_user);
-                    match fetch_gitlab_repos(gl_user).await {
+                    let auth_label = if gitlab_token.is_some() {
+                        " (authenticated)"
+                    } else {
+                        " (unauthenticated)"
+                    };
+                    eprintln!("Fetching GitLab repos for {}{}...", gl_user, auth_label);
+                    match fetch_gitlab_repos(gl_user, gitlab_token.as_deref(), max_repos).await {
                         Ok(gl_repos) => {
                             eprintln!("  fetched {} GitLab repos", gl_repos.len());
                             all_projects.extend(gl_repos);
@@ -3060,5 +3166,39 @@ mod tests {
         );
         assert!(s.contains("0 remaining"));
         assert!(s.contains("resets in"));
+    }
+
+    // ── parse_link_next ────────────────────────────────────────────────
+
+    #[test]
+    fn parse_link_next_finds_next_url() {
+        // GitHub's actual format
+        let h = r#"<https://api.github.com/user/repos?page=2>; rel="next", <https://api.github.com/user/repos?page=20>; rel="last""#;
+        assert_eq!(
+            parse_link_next(h).as_deref(),
+            Some("https://api.github.com/user/repos?page=2")
+        );
+    }
+
+    #[test]
+    fn parse_link_next_returns_none_when_only_last_present() {
+        let h = r#"<https://api.github.com/user/repos?page=20>; rel="last""#;
+        assert_eq!(parse_link_next(h), None);
+    }
+
+    #[test]
+    fn parse_link_next_returns_none_for_garbage() {
+        assert_eq!(parse_link_next(""), None);
+        assert_eq!(parse_link_next("not a link header"), None);
+    }
+
+    #[test]
+    fn parse_link_next_handles_first_and_prev_too() {
+        // Real header on a middle page has prev, first, next, last
+        let h = r#"<https://api.github.com/user/repos?page=1>; rel="first", <https://api.github.com/user/repos?page=2>; rel="prev", <https://api.github.com/user/repos?page=4>; rel="next", <https://api.github.com/user/repos?page=20>; rel="last""#;
+        assert_eq!(
+            parse_link_next(h).as_deref(),
+            Some("https://api.github.com/user/repos?page=4")
+        );
     }
 }
