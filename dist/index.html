@@ -159,6 +159,20 @@
             </div>
             <span class="text-[9px] text-error" id="count-dirty-side">0</span>
         </a>
+        <a class="filter-link flex items-center justify-between text-on-surface-variant p-2 hover:bg-surface-variant rounded-sm mb-1 cursor-pointer transition-colors" data-filter="stale">
+            <div class="flex items-center gap-2">
+                <span class="material-symbols-outlined text-[16px]">hourglass_empty</span>
+                <span title="No filesystem activity for ≥ 21 days — projects that may be quietly rotting">STALE</span>
+            </div>
+            <span class="text-[9px] text-claude-orange" id="count-stale-side">0</span>
+        </a>
+        <a class="filter-link flex items-center justify-between text-on-surface-variant p-2 hover:bg-surface-variant rounded-sm mb-1 cursor-pointer transition-colors" data-filter="rotting">
+            <div class="flex items-center gap-2">
+                <span class="material-symbols-outlined text-[16px]">priority_high</span>
+                <span title="Stale AND dirty — uncommitted work sitting for 21+ days. Finish or kill.">ROTTING</span>
+            </div>
+            <span class="text-[9px] text-error" id="count-rotting-side">0</span>
+        </a>
         <a class="filter-link flex items-center justify-between text-on-surface-variant p-2 hover:bg-surface-variant rounded-sm mb-1 cursor-pointer transition-colors" data-filter="favorites">
             <div class="flex items-center gap-2">
                 <span class="material-symbols-outlined text-[16px]" style="font-variation-settings: 'FILL' 1, 'wght' 300;">star</span>
@@ -458,6 +472,27 @@
     let favorites = loadFavorites();
 
     function isFav(p) { return favorites.has(p.path); }
+
+    // Staleness — projects untouched for STALE_THRESHOLD_DAYS or more.
+    // Threshold matches README's "three weeks" promise.
+    const STALE_THRESHOLD_DAYS = 21;
+    function daysSinceModified(p) {
+        if (!p.lastModified) return null;
+        const t = Date.parse(p.lastModified);
+        if (isNaN(t)) return null;
+        return Math.floor((Date.now() - t) / (1000 * 60 * 60 * 24));
+    }
+    function isStale(p) {
+        // Only locally-surveyed projects have a meaningful filesystem mtime.
+        // GitHub/GitLab `lastModified` is push date, which conflates "stale"
+        // with "lazy maintainer" — skip them to keep the signal honest.
+        if (!['Git', 'Folder', 'Idea'].includes(p.project_type)) return false;
+        const d = daysSinceModified(p);
+        return d !== null && d >= STALE_THRESHOLD_DAYS;
+    }
+    function isRotting(p) {
+        return isStale(p) && p.gitStatus === 'uncommitted';
+    }
 
     function purgeProject(path, name, ev) {
         if (ev) ev.stopPropagation();
@@ -1163,6 +1198,8 @@
             const matchesSearch = p.name.toLowerCase().includes(searchTerm) || (p.description || '').toLowerCase().includes(searchTerm);
             let matchesFilter = currentFilter === 'all' || p.project_type === currentFilter;
             if (currentFilter === 'dirty') matchesFilter = p.gitStatus === 'uncommitted';
+            else if (currentFilter === 'stale') matchesFilter = isStale(p);
+            else if (currentFilter === 'rotting') matchesFilter = isRotting(p);
             else if (currentFilter === 'favorites') matchesFilter = isFav(p);
             else if (currentFilter && currentFilter.startsWith('cat:')) {
                 const cat = currentFilter.slice(4);
@@ -1217,8 +1254,20 @@
                     ? `<span class="${tc} ${tc.replace('text-', 'bg-')}/10 px-1">${escapeHtml(p.gitBranch)}</span>`
                     : '';
 
-                // Dirty border
-                const dirtyBorder = isDirty ? 'border-l-2 border-l-error' : '';
+                // Dirty border (precedence: rotting > dirty > stale)
+                const stale = isStale(p);
+                const rotting = stale && isDirty;
+                const dirtyBorder = rotting
+                    ? 'border-l-2 border-l-error'
+                    : isDirty
+                        ? 'border-l-2 border-l-error/60'
+                        : stale
+                            ? 'border-l-2 border-l-claude-orange/60'
+                            : '';
+                const days = daysSinceModified(p);
+                const staleBadge = stale
+                    ? `<span class="px-1 border border-claude-orange/40 text-claude-orange cursor-help" title="No activity for ${days} days — surfaced because the threshold is ${STALE_THRESHOLD_DAYS}">STALE: ${days}d</span>`
+                    : '';
 
                 // NOTE button for projects with linked Obsidian notes
                 const noteBtn = p.obsidianUrl
@@ -1273,6 +1322,7 @@
                                     ${techTags}
                                     ${catTags}
                                     ${isDirty ? '<span class="px-1 border border-error/30 text-error cursor-help" title="Uncommitted changes — click the warning icon to see changed files">DIRTY</span>' : ''}
+                                    ${staleBadge}
                                 </div>
                             </div>
                         </div>
@@ -1372,8 +1422,17 @@
         container.className = 'grid gap-2 grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5';
         container.innerHTML = filtered.map((p, idx) => {
             const isDirty = p.gitStatus === 'uncommitted';
+            const stale = isStale(p);
+            const days = daysSinceModified(p);
             const tc = textColor[p.project_type] || 'text-on-surface-variant';
-            const bb = blockBorder[p.project_type] || 'border-l-outline';
+            // Border colour: rotting (stale + dirty) > dirty > stale > type colour
+            const bb = (stale && isDirty)
+                ? 'border-l-error'
+                : isDirty
+                    ? 'border-l-error/60'
+                    : stale
+                        ? 'border-l-claude-orange/60'
+                        : (blockBorder[p.project_type] || 'border-l-outline');
             const desc = (p.description || '').trim();
             const truncDesc = desc.length > 220 ? desc.slice(0, 217) + '…' : desc;
             const tech = (p.techStack || []).slice(0, 2).map(t =>
@@ -1400,6 +1459,7 @@
                     ${tech}
                     ${cats}
                     ${isDirty ? '<span class="px-1 border border-error/30 text-error">DIRTY</span>' : ''}
+                    ${stale ? `<span class="px-1 border border-claude-orange/40 text-claude-orange" title="No activity for ${days} days">STALE: ${days}d</span>` : ''}
                 </div>
             </div>`;
         }).join('');
@@ -1446,7 +1506,7 @@
         data.nodes.forEach(n => {
             const matchesSearch = !searchTerm || n.name.toLowerCase().includes(searchTerm) || (n.description || '').toLowerCase().includes(searchTerm);
             let matchesFilter = currentFilter === 'all' || n.type === currentFilter;
-            if (currentFilter === 'dirty') return;
+            if (currentFilter === 'dirty' || currentFilter === 'stale' || currentFilter === 'rotting') return;
             else if (currentFilter === 'favorites') matchesFilter = favorites.has(n.path);
             else if (currentFilter && currentFilter.startsWith('cat:')) {
                 const cat = currentFilter.slice(4);
@@ -1638,6 +1698,8 @@
             const dc = projects.filter(p => p.gitStatus === 'uncommitted').length;
             document.getElementById('count-dirty').textContent = dc;
             document.getElementById('count-dirty-side').textContent = dc;
+            document.getElementById('count-stale-side').textContent = projects.filter(isStale).length;
+            document.getElementById('count-rotting-side').textContent = projects.filter(isRotting).length;
             renderCategoryList();
             updateCounts();
             renderProjects();
