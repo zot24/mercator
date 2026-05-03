@@ -176,22 +176,38 @@ The serve command re-reads the JSON file on each request, so running `survey --w
 
 ## Docker
 
+The image's default `CMD` binds to `127.0.0.1` inside the container, which is unreachable from the host. To expose the dashboard you must explicitly opt into a public bind **and** set `MERCATOR_TOKEN`:
+
 ```bash
 # Build
 docker build -t mercator .
 
-# Run (mount your code directory)
-docker run -p 3000:3000 -v ~/code:/data/code:ro mercator \
-  sh -c "mercator survey /data/code -o /data/map.json && mercator serve -b 0.0.0.0 -m /data/map.json"
+# Generate an API token once
+TOKEN=$(openssl rand -hex 32)
+
+# Run with auth (mount your code directory read-only)
+docker run -p 3000:3000 \
+  -e MERCATOR_TOKEN=$TOKEN \
+  -v ~/code:/data/code:ro \
+  mercator sh -c "mercator survey /data/code -o /data/map.json && \
+                  mercator serve -b 0.0.0.0 -m /data/map.json"
 
 # With GitHub integration
-docker run -p 3000:3000 -v ~/code:/data/code:ro mercator \
-  sh -c "mercator survey /data/code --github zot24 -o /data/map.json && mercator serve -b 0.0.0.0 -m /data/map.json"
+docker run -p 3000:3000 \
+  -e MERCATOR_TOKEN=$TOKEN \
+  -v ~/code:/data/code:ro \
+  mercator sh -c "mercator survey /data/code --github zot24 -o /data/map.json && \
+                  mercator serve -b 0.0.0.0 -m /data/map.json"
 
 # With watch mode (survey + serve in parallel)
-docker run -p 3000:3000 -v ~/code:/data/code:ro mercator \
-  sh -c "mercator survey /data/code --github zot24 -o /data/map.json -w 5 & mercator serve -b 0.0.0.0 -m /data/map.json"
+docker run -p 3000:3000 \
+  -e MERCATOR_TOKEN=$TOKEN \
+  -v ~/code:/data/code:ro \
+  mercator sh -c "mercator survey /data/code --github zot24 -o /data/map.json -w 5 & \
+                  mercator serve -b 0.0.0.0 -m /data/map.json"
 ```
+
+When `MERCATOR_TOKEN` is set, every `/api/*` request must include `Authorization: Bearer $TOKEN`. The dashboard HTML itself is served without auth (the API behind it is the sensitive surface), so cross-network usage requires a browser extension to inject the header — for local use, prefer ssh-tunnelling to a `127.0.0.1` bind.
 
 ## Project Types Detected
 

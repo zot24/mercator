@@ -3,6 +3,9 @@
 
 use axum::{
     extract::State,
+    http::{HeaderMap, StatusCode},
+    middleware::{self, Next},
+    response::Response,
     routing::{get, post},
     Json, Router,
 };
@@ -2540,7 +2543,11 @@ async fn main() {
                 map_file: map_file.clone(),
             };
 
-            let app = Router::new()
+            // /api/* routes are protected by an optional Bearer token
+            // (set MERCATOR_TOKEN). Static dist/ files are served without auth
+            // since the dashboard HTML itself is public; the API is the
+            // sensitive surface.
+            let api = Router::new()
                 .route("/api/map", get(serve_map))
                 .route("/api/graph", get(serve_graph))
                 .route("/api/open-terminal", post(open_terminal))
@@ -2554,18 +2561,44 @@ async fn main() {
                 .route("/api/project/file", get(project_file_api));
 
             #[cfg(feature = "swarm")]
-            let app = app
+            let api = api
                 .route("/api/agent/run", post(agent_run))
                 .route("/api/agent/jobs", get(agent_jobs))
                 .route("/api/agent/job/{id}", get(agent_job_detail))
                 .route("/api/agent/job/{id}/log", get(agent_job_log))
                 .route("/api/agent/job/{id}/cancel", post(agent_cancel));
 
-            let app = app
+            let api = api.layer(middleware::from_fn(require_token));
+
+            let app = Router::new()
+                .merge(api)
                 .with_state(app_state)
                 .fallback_service(ServeDir::new("dist"));
 
             let addr = SocketAddr::from((bind, port));
+
+            // Bind / auth safety check
+            let token_set = std::env::var("MERCATOR_TOKEN")
+                .ok()
+                .filter(|t| !t.is_empty())
+                .is_some();
+            let is_loopback = bind.is_loopback();
+            if !is_loopback && !token_set {
+                eprintln!();
+                eprintln!("⚠  WARNING: binding to a non-loopback address without MERCATOR_TOKEN.");
+                eprintln!("   Anyone reachable on the network can hit /api/* — including");
+                eprintln!("   /api/project/file (read any file under a surveyed project) and,");
+                eprintln!("   if --features swarm is on, /api/agent/run (spawn paid LLM tasks).");
+                eprintln!();
+                eprintln!(
+                    "   To require auth: MERCATOR_TOKEN=<secret> mercator serve -b {} -p {}",
+                    bind, port
+                );
+                eprintln!("   To stay safe:    mercator serve  (default 127.0.0.1)");
+                eprintln!();
+            } else if token_set {
+                println!("API auth: MERCATOR_TOKEN required (Bearer scheme)");
+            }
             println!("Mercator map available at http://{}", addr);
             println!("Press Ctrl+C to stop");
 
@@ -2574,6 +2607,44 @@ async fn main() {
                 .expect("Failed to bind to port");
             axum::serve(listener, app).await.expect("Server error");
         }
+    }
+}
+
+/// Extract the bearer token from an `Authorization: Bearer <token>` header.
+/// Returns `None` if the header is missing, malformed, or uses a different
+/// scheme.
+fn extract_bearer_token(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get("authorization")
+        .and_then(|h| h.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer "))
+}
+
+/// Decide whether a request is authorised given the configured expected
+/// token (None = no token configured = always allowed) and the request's
+/// Authorization header.
+fn is_authorised(expected: Option<&str>, headers: &HeaderMap) -> bool {
+    let Some(expected) = expected else {
+        return true;
+    };
+    extract_bearer_token(headers) == Some(expected)
+}
+
+/// Axum middleware: when `MERCATOR_TOKEN` is set in the environment, every
+/// `/api/*` request must carry `Authorization: Bearer <token>`. When the env
+/// is unset, requests pass through unchanged.
+async fn require_token(
+    headers: HeaderMap,
+    request: axum::extract::Request,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    let expected = std::env::var("MERCATOR_TOKEN")
+        .ok()
+        .filter(|t| !t.is_empty());
+    if is_authorised(expected.as_deref(), &headers) {
+        Ok(next.run(request).await)
+    } else {
+        Err(StatusCode::UNAUTHORIZED)
     }
 }
 
@@ -2814,5 +2885,57 @@ mod tests {
         let mut v = vec![p];
         auto_tag_projects(&mut v);
         assert!(v[0].tags.is_empty());
+    }
+
+    // ── auth helpers ───────────────────────────────────────────────────
+
+    fn hdrs_with_auth(value: &str) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert("authorization", value.parse().unwrap());
+        h
+    }
+
+    #[test]
+    fn extract_bearer_token_strips_scheme() {
+        assert_eq!(
+            extract_bearer_token(&hdrs_with_auth("Bearer secret-123")),
+            Some("secret-123")
+        );
+    }
+
+    #[test]
+    fn extract_bearer_token_rejects_other_schemes() {
+        assert_eq!(extract_bearer_token(&hdrs_with_auth("Basic abc")), None);
+        assert_eq!(extract_bearer_token(&hdrs_with_auth("secret-123")), None);
+    }
+
+    #[test]
+    fn extract_bearer_token_returns_none_when_header_missing() {
+        let h = HeaderMap::new();
+        assert_eq!(extract_bearer_token(&h), None);
+    }
+
+    #[test]
+    fn is_authorised_passes_when_no_token_configured() {
+        let h = HeaderMap::new();
+        assert!(is_authorised(None, &h));
+    }
+
+    #[test]
+    fn is_authorised_rejects_missing_token_when_configured() {
+        let h = HeaderMap::new();
+        assert!(!is_authorised(Some("secret"), &h));
+    }
+
+    #[test]
+    fn is_authorised_rejects_wrong_token() {
+        let h = hdrs_with_auth("Bearer not-the-secret");
+        assert!(!is_authorised(Some("secret"), &h));
+    }
+
+    #[test]
+    fn is_authorised_accepts_correct_bearer_token() {
+        let h = hdrs_with_auth("Bearer secret");
+        assert!(is_authorised(Some("secret"), &h));
     }
 }
