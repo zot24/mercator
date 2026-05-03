@@ -1125,7 +1125,18 @@
     }
 
     function cancelJob(jobId) {
-        showToast('Cancel not yet implemented');
+        if (!confirm('Stop this agent? Any in-flight LLM calls and tool calls will be aborted.')) return;
+        fetch('/api/agent/job/' + encodeURIComponent(jobId) + '/cancel', { method: 'POST' })
+            .then(r => r.json())
+            .then(data => {
+                if (data.ok) {
+                    showToast('AGENT STOPPED');
+                    fetchAndRenderJobs();
+                } else {
+                    showToast('CANCEL FAILED: ' + (data.error || 'unknown'), true);
+                }
+            })
+            .catch(e => showToast('ERROR: ' + e, true));
     }
 
     function formatDate(iso) {

@@ -1442,6 +1442,11 @@ struct AgentJob {
 struct AppState {
     #[cfg(feature = "swarm")]
     jobs: Arc<Mutex<Vec<AgentJob>>>,
+    /// JoinHandles for in-flight agent tasks, keyed by job id. A `cancel`
+    /// request looks the handle up here and `.abort()`s it. The spawned
+    /// task removes its own entry on completion.
+    #[cfg(feature = "swarm")]
+    task_handles: Arc<Mutex<std::collections::HashMap<String, tokio::task::JoinHandle<()>>>>,
     map_file: PathBuf,
 }
 
@@ -1738,6 +1743,7 @@ async fn agent_run(
 
     // Spawn the swarm orchestrator in background
     let jobs = state.jobs.clone();
+    let task_handles = state.task_handles.clone();
     let job_id_clone = job_id.clone();
     let project_path = req.project_path.clone();
     let prompt = req.prompt.clone();
@@ -1745,44 +1751,91 @@ async fn agent_run(
     let permission_mode = req.permission_mode;
     let max_budget = req.max_budget_usd;
 
-    tokio::spawn(async move {
-        let result = run_swarm_task(
-            &job_id_clone,
-            &project_path,
-            &prompt,
-            &model,
-            &permission_mode,
-            max_budget,
-        )
-        .await;
+    let handle = tokio::spawn({
+        let task_handles = task_handles.clone();
+        let job_id_inner = job_id_clone.clone();
+        async move {
+            let result = run_swarm_task(
+                &job_id_inner,
+                &project_path,
+                &prompt,
+                &model,
+                &permission_mode,
+                max_budget,
+            )
+            .await;
 
-        let mut jobs = jobs.lock().await;
-        if let Some(job) = jobs.iter_mut().find(|j| j.id == job_id_clone) {
-            match result {
-                Ok(outcome) => {
-                    job.status = "succeeded".to_string();
-                    job.cost_usd = outcome.cost_usd;
-                    job.tool_calls = outcome.tool_calls;
-                    job.input_tokens = outcome.input_tokens;
-                    job.output_tokens = outcome.output_tokens;
-                    job.summary = outcome.summary;
-                    job.branch = outcome.branch;
-                    job.changed_files = outcome.changed_files;
+            let mut jobs = jobs.lock().await;
+            if let Some(job) = jobs.iter_mut().find(|j| j.id == job_id_inner) {
+                // Don't clobber a status the cancel handler already set.
+                let already_terminal = job.status != "running";
+                match result {
+                    Ok(outcome) => {
+                        if !already_terminal {
+                            job.status = "succeeded".to_string();
+                        }
+                        job.cost_usd = outcome.cost_usd;
+                        job.tool_calls = outcome.tool_calls;
+                        job.input_tokens = outcome.input_tokens;
+                        job.output_tokens = outcome.output_tokens;
+                        job.summary = outcome.summary;
+                        job.branch = outcome.branch;
+                        job.changed_files = outcome.changed_files;
+                    }
+                    Err(e) => {
+                        if !already_terminal {
+                            job.status = "failed".to_string();
+                            job.error = Some(e);
+                        }
+                    }
                 }
-                Err(e) => {
-                    job.status = "failed".to_string();
-                    job.error = Some(e);
+                if job.finished_at.is_none() {
+                    job.finished_at = Some(
+                        chrono::Local::now()
+                            .format("%Y-%m-%dT%H:%M:%SZ")
+                            .to_string(),
+                    );
                 }
             }
-            job.finished_at = Some(
-                chrono::Local::now()
-                    .format("%Y-%m-%dT%H:%M:%SZ")
-                    .to_string(),
-            );
+            // Self-cleanup so cancel can't abort a finished handle later.
+            task_handles.lock().await.remove(&job_id_inner);
         }
     });
+    task_handles.lock().await.insert(job_id_clone, handle);
 
     Json(serde_json::json!({ "job_id": job_id }))
+}
+
+#[cfg(feature = "swarm")]
+async fn agent_cancel(
+    State(state): State<AppState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Json<serde_json::Value> {
+    let handle = state.task_handles.lock().await.remove(&id);
+    let Some(handle) = handle else {
+        return Json(serde_json::json!({
+            "ok": false,
+            "error": "Job not running or already finished"
+        }));
+    };
+    handle.abort();
+
+    let mut jobs = state.jobs.lock().await;
+    let Some(job) = jobs.iter_mut().find(|j| j.id == id) else {
+        return Json(serde_json::json!({
+            "ok": true,
+            "warning": "Task aborted but no job record found"
+        }));
+    };
+    if job.status == "running" {
+        job.status = "cancelled".to_string();
+        job.finished_at = Some(
+            chrono::Local::now()
+                .format("%Y-%m-%dT%H:%M:%SZ")
+                .to_string(),
+        );
+    }
+    Json(serde_json::json!({ "ok": true, "id": id, "status": job.status }))
 }
 
 #[cfg(feature = "swarm")]
@@ -2482,6 +2535,8 @@ async fn main() {
             let app_state = AppState {
                 #[cfg(feature = "swarm")]
                 jobs: Arc::new(Mutex::new(Vec::new())),
+                #[cfg(feature = "swarm")]
+                task_handles: Arc::new(Mutex::new(std::collections::HashMap::new())),
                 map_file: map_file.clone(),
             };
 
@@ -2503,7 +2558,8 @@ async fn main() {
                 .route("/api/agent/run", post(agent_run))
                 .route("/api/agent/jobs", get(agent_jobs))
                 .route("/api/agent/job/{id}", get(agent_job_detail))
-                .route("/api/agent/job/{id}/log", get(agent_job_log));
+                .route("/api/agent/job/{id}/log", get(agent_job_log))
+                .route("/api/agent/job/{id}/cancel", post(agent_cancel));
 
             let app = app
                 .with_state(app_state)
