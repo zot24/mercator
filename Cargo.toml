@@ -3,6 +3,23 @@ name = "mercator"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+default = []
+# Enables the in-dashboard agent runner backed by the local `swarm` crate.
+#
+# `swarm` is not yet published or vendored, so the dep is *not* declared in
+# this manifest. To use the agent runner locally, add the path dep manually
+# to the `[dependencies]` block below and build with `--features swarm`:
+#
+#     [dependencies]
+#     swarm = { path = "../swarm" }
+#
+#     $ cargo build --features swarm
+#
+# Default builds (CI, Docker, `cargo install`) skip all agent code so they
+# don't require the sibling `../swarm` directory. Tracked in #21.
+swarm = []
+
 [dependencies]
 axum = "0.8.8"
 chrono = { version = "0.4.44", default-features = false, features = ["clock"] }
@@ -16,4 +33,3 @@ toml = "1.0.7"
 tower-http = { version = "0.6.8", features = ["fs"] }
 uuid = { version = "1", features = ["v4"] }
 walkdir = "2.5.0"
-swarm = { path = "../swarm" }
