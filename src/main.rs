@@ -1,17 +1,23 @@
 // Mercator - Project Topography Tool
 // A Rust CLI tool for discovering and visualizing your local development projects
 
+use axum::{
+    extract::State,
+    routing::{get, post},
+    Json, Router,
+};
 use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
-use std::time::SystemTime;
-use std::process::Command;
-use walkdir::WalkDir;
-use axum::{extract::State, routing::{get, post}, Json, Router};
 use std::net::{IpAddr, SocketAddr};
+use std::path::{Path, PathBuf};
+use std::process::Command;
+#[cfg(feature = "swarm")]
 use std::sync::Arc;
+use std::time::SystemTime;
+#[cfg(feature = "swarm")]
 use tokio::sync::Mutex;
 use tower_http::services::ServeDir;
+use walkdir::WalkDir;
 
 #[derive(Parser)]
 #[command(name = "mercator")]
@@ -99,10 +105,18 @@ struct Project {
     #[serde(rename = "agentUsed")]
     agent_used: Option<String>,
     /// Obsidian URI to open the linked note
-    #[serde(rename = "obsidianUrl", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "obsidianUrl",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     obsidian_url: Option<String>,
     /// Relative path to the Obsidian note within the vault
-    #[serde(rename = "obsidianNotePath", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "obsidianNotePath",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     obsidian_note_path: Option<String>,
     /// Auto-generated topic tags for graph edges and semantic grouping
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -142,29 +156,40 @@ fn git_command(path: &Path, args: &[&str]) -> Option<String> {
 }
 
 /// Get git status for a repository
-fn get_git_info(path: &Path) -> (Option<String>, Option<String>, Option<String>, Option<String>) {
+fn get_git_info(
+    path: &Path,
+) -> (
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+) {
     let branch = git_command(path, &["rev-parse", "--abbrev-ref", "HEAD"]);
     let commit = git_command(path, &["log", "-1", "--pretty=%s"]);
     let remote_url = git_command(path, &["remote", "get-url", "origin"]);
-    
+
     let status = git_command(path, &["status", "--porcelain"]);
     let git_status = if status.as_ref().map(|s| !s.is_empty()).unwrap_or(false) {
         Some("uncommitted".to_string())
     } else {
         None
     };
-    
+
     (branch, commit, git_status, remote_url)
 }
 
 /// Fetch repositories from GitHub API
 async fn fetch_github_repos(username: &str) -> Vec<Project> {
     let mut projects = Vec::new();
-    
+
     let client = reqwest::Client::new();
-    let url = format!("https://api.github.com/users/{}/repos?per_page=100&sort=pushed", username);
-    
-    match client.get(&url)
+    let url = format!(
+        "https://api.github.com/users/{}/repos?per_page=100&sort=pushed",
+        username
+    );
+
+    match client
+        .get(&url)
         .header("User-Agent", "Mercator/1.0")
         .header("Accept", "application/vnd.github.v3+json")
         .send()
@@ -174,7 +199,7 @@ async fn fetch_github_repos(username: &str) -> Vec<Project> {
             if let Ok(repos) = response.json::<Vec<GitHubRepo>>().await {
                 for repo in repos.into_iter().take(50) {
                     let tech_stack = detect_github_tech_stack(&repo);
-                    
+
                     projects.push(Project {
                         name: repo.name.clone(),
                         path: repo.html_url.clone(),
@@ -198,7 +223,7 @@ async fn fetch_github_repos(username: &str) -> Vec<Project> {
             eprintln!("Warning: Failed to fetch GitHub repos: {}", e);
         }
     }
-    
+
     projects
 }
 
@@ -216,11 +241,11 @@ struct GitHubRepo {
 /// Detect tech stack from GitHub repo metadata
 fn detect_github_tech_stack(repo: &GitHubRepo) -> Vec<String> {
     let mut stack = Vec::new();
-    
+
     if let Some(lang) = &repo.language {
         stack.push(lang.clone());
     }
-    
+
     if let Some(topics) = &repo.topics {
         for topic in topics.iter().take(3) {
             if !stack.contains(topic) {
@@ -228,18 +253,22 @@ fn detect_github_tech_stack(repo: &GitHubRepo) -> Vec<String> {
             }
         }
     }
-    
+
     stack
 }
 
 /// Fetch repositories from GitLab API
 async fn fetch_gitlab_repos(username: &str) -> Vec<Project> {
     let mut projects = Vec::new();
-    
+
     let client = reqwest::Client::new();
-    let url = format!("https://gitlab.com/api/v4/users/{}/projects?per_page=50&order_by=pushed_at", username);
-    
-    match client.get(&url)
+    let url = format!(
+        "https://gitlab.com/api/v4/users/{}/projects?per_page=50&order_by=pushed_at",
+        username
+    );
+
+    match client
+        .get(&url)
         .header("User-Agent", "Mercator/1.0")
         .send()
         .await
@@ -248,7 +277,7 @@ async fn fetch_gitlab_repos(username: &str) -> Vec<Project> {
             if let Ok(repos) = response.json::<Vec<GitLabRepo>>().await {
                 for repo in repos.into_iter().take(50) {
                     let tech_stack = detect_gitlab_tech_stack(&repo);
-                    
+
                     projects.push(Project {
                         name: repo.name.clone(),
                         path: repo.web_url.clone(),
@@ -272,7 +301,7 @@ async fn fetch_gitlab_repos(username: &str) -> Vec<Project> {
             eprintln!("Warning: Failed to fetch GitLab repos: {}", e);
         }
     }
-    
+
     projects
 }
 
@@ -290,20 +319,20 @@ struct GitLabRepo {
 /// Detect tech stack from GitLab repo metadata
 fn detect_gitlab_tech_stack(repo: &GitLabRepo) -> Vec<String> {
     let mut stack = Vec::new();
-    
+
     if let Some(tags) = &repo.tag_list {
         for tag in tags.iter().take(3) {
             stack.push(tag.clone());
         }
     }
-    
+
     stack
 }
 
 /// Detect tech stack based on project files
 fn detect_tech_stack(path: &Path) -> Vec<String> {
     let mut stack = Vec::new();
-    
+
     let tech_markers = [
         ("package.json", "Node.js"),
         ("Cargo.toml", "Rust"),
@@ -324,22 +353,20 @@ fn detect_tech_stack(path: &Path) -> Vec<String> {
         ("composer.json", "PHP"),
         ("mix.exs", "Elixir"),
     ];
-    
+
     if let Ok(entries) = std::fs::read_dir(path) {
         for entry in entries.flatten() {
             let file_name = entry.file_name();
             let name = file_name.to_string_lossy().into_owned();
-            
+
             for (marker, tech) in &tech_markers {
-                if name == *marker {
-                    if !stack.contains(&tech.to_string()) {
-                        stack.push(tech.to_string());
-                    }
+                if name == *marker && !stack.contains(&tech.to_string()) {
+                    stack.push(tech.to_string());
                 }
             }
         }
     }
-    
+
     stack
 }
 
@@ -362,7 +389,8 @@ fn survey_projects(root: &Path) -> Vec<Project> {
 
     while let Some(Ok(entry)) = it.next() {
         let path = entry.path();
-        let name = path.file_name()
+        let name = path
+            .file_name()
             .unwrap_or_default()
             .to_string_lossy()
             .into_owned();
@@ -380,7 +408,9 @@ fn survey_projects(root: &Path) -> Vec<Project> {
                 let description = description_from_repo(path)
                     .unwrap_or_else(|| "No description provided.".to_string());
 
-                let last_modified = entry.metadata().ok()
+                let last_modified = entry
+                    .metadata()
+                    .ok()
                     .and_then(|m| m.modified().ok())
                     .map(format_time);
 
@@ -395,7 +425,11 @@ fn survey_projects(root: &Path) -> Vec<Project> {
                     name,
                     path: path.to_string_lossy().into_owned(),
                     description,
-                    project_type: if is_git { ProjectType::Git } else { ProjectType::Idea },
+                    project_type: if is_git {
+                        ProjectType::Git
+                    } else {
+                        ProjectType::Idea
+                    },
                     last_modified,
                     git_branch,
                     last_commit,
@@ -487,10 +521,16 @@ fn deduplicate_projects(projects: Vec<Project>) -> Vec<Project> {
     // For each local project, try to find and merge a matching remote
     let mut result: Vec<Project> = Vec::new();
     for mut local in local_projects {
-        let matched_key = local.remote_url.as_ref()
+        let matched_key = local
+            .remote_url
+            .as_ref()
             .map(|url| normalize_remote_url(url))
             .and_then(|key| {
-                if remote_by_url.contains_key(&key) { Some(key) } else { None }
+                if remote_by_url.contains_key(&key) {
+                    Some(key)
+                } else {
+                    None
+                }
             })
             // Fallback: match by name for Folder types without remote URLs
             .or_else(|| remote_by_name.get(&local.name.to_lowercase()).cloned());
@@ -499,13 +539,12 @@ fn deduplicate_projects(projects: Vec<Project>) -> Vec<Project> {
             if let Some(remote) = remote_by_url.remove(&key) {
                 remote_by_name.remove(&remote.name.to_lowercase());
                 // Merge: local wins, but fill in gaps from remote
-                if local.description == "No description provided."
+                if (local.description == "No description provided."
                     || local.description == "Uncategorized directory"
-                    || local.description.starts_with('#')
+                    || local.description.starts_with('#'))
+                    && !remote.description.is_empty()
                 {
-                    if !remote.description.is_empty() {
-                        local.description = remote.description;
-                    }
+                    local.description = remote.description;
                 }
                 // Merge tech stacks
                 for tech in &remote.tech_stack {
@@ -531,19 +570,18 @@ fn deduplicate_projects(projects: Vec<Project>) -> Vec<Project> {
 fn save_map(projects: &[Project], output: &Path) -> Result<(), String> {
     let json = serde_json::to_string_pretty(projects)
         .map_err(|e| format!("Failed to serialize projects: {}", e))?;
-    
+
     std::fs::write(output, &json)
         .map_err(|e| format!("Failed to write to {}: {}", output.display(), e))?;
-    
+
     Ok(())
 }
 
 fn load_map(path: &Path) -> Result<Vec<Project>, String> {
     let content = std::fs::read_to_string(path)
         .map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
-    
-    serde_json::from_str(&content)
-        .map_err(|e| format!("Failed to parse JSON: {}", e))
+
+    serde_json::from_str(&content).map_err(|e| format!("Failed to parse JSON: {}", e))
 }
 
 #[derive(Deserialize)]
@@ -582,9 +620,10 @@ async fn open_terminal(Json(req): Json<OpenTerminalRequest>) -> Json<OpenTermina
     );
 
     match Command::new("osascript").arg("-e").arg(&script).output() {
-        Ok(output) if output.status.success() => {
-            Json(OpenTerminalResponse { success: true, error: None })
-        }
+        Ok(output) if output.status.success() => Json(OpenTerminalResponse {
+            success: true,
+            error: None,
+        }),
         Ok(output) => {
             let stderr = String::from_utf8_lossy(&output.stderr).to_string();
             Json(OpenTerminalResponse {
@@ -592,12 +631,10 @@ async fn open_terminal(Json(req): Json<OpenTerminalRequest>) -> Json<OpenTermina
                 error: Some(stderr),
             })
         }
-        Err(e) => {
-            Json(OpenTerminalResponse {
-                success: false,
-                error: Some(format!("Failed to run osascript: {}", e)),
-            })
-        }
+        Err(e) => Json(OpenTerminalResponse {
+            success: false,
+            error: Some(format!("Failed to run osascript: {}", e)),
+        }),
     }
 }
 
@@ -621,7 +658,9 @@ fn strip_inline_md(s: &str) -> String {
         } else if c == '*' || c == '_' {
             // Skip emphasis markers (*, **, _, __)
             i += 1;
-            while i < bytes.len() && (bytes[i] as char == c) { i += 1; }
+            while i < bytes.len() && (bytes[i] as char == c) {
+                i += 1;
+            }
             continue;
         } else if c == '`' {
             i += 1;
@@ -668,7 +707,9 @@ fn extract_md_description(path: &Path) -> Option<String> {
     for line in lines.iter() {
         let t = line.trim();
         if !started {
-            if is_skip(t) { continue; }
+            if is_skip(t) {
+                continue;
+            }
             started = true;
         } else if t.is_empty() {
             break;
@@ -680,20 +721,32 @@ fn extract_md_description(path: &Path) -> Option<String> {
         let t = t.trim_start_matches('>').trim();
         let t = t.strip_prefix("- ").unwrap_or(t);
         let t = t.strip_prefix("* ").unwrap_or(t);
-        if !paragraph.is_empty() { paragraph.push(' '); }
+        if !paragraph.is_empty() {
+            paragraph.push(' ');
+        }
         paragraph.push_str(t);
     }
 
-    if paragraph.is_empty() { return None; }
+    if paragraph.is_empty() {
+        return None;
+    }
     let cleaned = strip_inline_md(&paragraph);
     let cleaned = cleaned.trim();
-    if cleaned.is_empty() { return None; }
+    if cleaned.is_empty() {
+        return None;
+    }
 
     // Cap at ~240 chars on a word boundary
     const MAX: usize = 240;
     let final_str = if cleaned.chars().count() > MAX {
-        let mut end = cleaned.char_indices().nth(MAX).map(|(i, _)| i).unwrap_or(cleaned.len());
-        if let Some(space) = cleaned[..end].rfind(' ') { end = space; }
+        let mut end = cleaned
+            .char_indices()
+            .nth(MAX)
+            .map(|(i, _)| i)
+            .unwrap_or(cleaned.len());
+        if let Some(space) = cleaned[..end].rfind(' ') {
+            end = space;
+        }
         format!("{}…", &cleaned[..end])
     } else {
         cleaned.to_string()
@@ -706,7 +759,9 @@ fn description_from_repo(path: &Path) -> Option<String> {
     for name in &["IDEA.md", "README.md", "CLAUDE.md", "AGENTS.md"] {
         let p = path.join(name);
         if p.exists() {
-            if let Some(d) = extract_md_description(&p) { return Some(d); }
+            if let Some(d) = extract_md_description(&p) {
+                return Some(d);
+            }
         }
     }
     None
@@ -736,7 +791,10 @@ fn percent_encode(s: &str) -> String {
 fn scan_obsidian_vault(vault_path: &Path, folder: &str, vault_name: &str) -> Vec<Project> {
     let projects_path = vault_path.join(folder);
     if !projects_path.exists() {
-        eprintln!("Warning: Obsidian projects folder not found: {}", projects_path.display());
+        eprintln!(
+            "Warning: Obsidian projects folder not found: {}",
+            projects_path.display()
+        );
         return vec![];
     }
 
@@ -761,13 +819,13 @@ fn scan_obsidian_vault(vault_path: &Path, folder: &str, vault_name: &str) -> Vec
 
         if entry_path.is_dir() {
             // Subfolder = project. Read first .md inside for description.
-            let md_file = std::fs::read_dir(&entry_path).ok()
-                .and_then(|entries| {
-                    entries.flatten()
-                        .filter(|e| e.path().extension().map(|ext| ext == "md").unwrap_or(false))
-                        .next()
-                });
-            let description = md_file.as_ref()
+            let md_file = std::fs::read_dir(&entry_path).ok().and_then(|entries| {
+                entries
+                    .flatten()
+                    .find(|e| e.path().extension().map(|ext| ext == "md").unwrap_or(false))
+            });
+            let description = md_file
+                .as_ref()
                 .map(|md| read_md_description(&md.path()))
                 .unwrap_or_else(|| "Obsidian project folder".to_string());
 
@@ -780,9 +838,15 @@ fn scan_obsidian_vault(vault_path: &Path, folder: &str, vault_name: &str) -> Vec
             } else {
                 format!("{}/{}", folder, name)
             };
-            let obsidian_url = format!("obsidian://open?vault={}&file={}", percent_encode(vault_name), percent_encode(&relative));
+            let obsidian_url = format!(
+                "obsidian://open?vault={}&file={}",
+                percent_encode(vault_name),
+                percent_encode(&relative)
+            );
 
-            let last_modified = entry.metadata().ok()
+            let last_modified = entry
+                .metadata()
+                .ok()
                 .and_then(|m| m.modified().ok())
                 .map(format_time);
 
@@ -810,9 +874,15 @@ fn scan_obsidian_vault(vault_path: &Path, folder: &str, vault_name: &str) -> Vec
                         let line = line.trim();
                         if let Some(idea) = line.strip_prefix("- ") {
                             let idea = idea.trim();
-                            if idea.is_empty() { continue; }
+                            if idea.is_empty() {
+                                continue;
+                            }
                             let relative = format!("{}/{}", folder, "@Projects");
-                            let obsidian_url = format!("obsidian://open?vault={}&file={}", percent_encode(vault_name), percent_encode(&relative));
+                            let obsidian_url = format!(
+                                "obsidian://open?vault={}&file={}",
+                                percent_encode(vault_name),
+                                percent_encode(&relative)
+                            );
                             projects.push(Project {
                                 name: idea.to_string(),
                                 path: entry_path.to_string_lossy().into_owned(),
@@ -837,9 +907,15 @@ fn scan_obsidian_vault(vault_path: &Path, folder: &str, vault_name: &str) -> Vec
                 let project_name = name.strip_suffix(".md").unwrap_or(&name).to_string();
                 let description = read_md_description(&entry_path);
                 let relative = format!("{}/{}", folder, project_name);
-                let obsidian_url = format!("obsidian://open?vault={}&file={}", percent_encode(vault_name), percent_encode(&relative));
+                let obsidian_url = format!(
+                    "obsidian://open?vault={}&file={}",
+                    percent_encode(vault_name),
+                    percent_encode(&relative)
+                );
 
-                let last_modified = entry.metadata().ok()
+                let last_modified = entry
+                    .metadata()
+                    .ok()
                     .and_then(|m| m.modified().ok())
                     .map(format_time);
 
@@ -868,10 +944,7 @@ fn scan_obsidian_vault(vault_path: &Path, folder: &str, vault_name: &str) -> Vec
 
 /// Normalize a name for fuzzy matching (lowercase, strip hyphens/underscores/spaces)
 fn normalize_name(name: &str) -> String {
-    name.to_lowercase()
-        .replace('-', "")
-        .replace('_', "")
-        .replace(' ', "")
+    name.to_lowercase().replace(['-', '_', ' '], "")
 }
 
 /// Link Obsidian notes to existing projects by name matching.
@@ -929,30 +1002,179 @@ async fn get_git_status_api(
             let stderr = String::from_utf8_lossy(&o.stderr);
             Json(serde_json::json!({ "error": stderr.to_string() }))
         }
-        Err(e) => {
-            Json(serde_json::json!({ "error": format!("{}", e) }))
-        }
+        Err(e) => Json(serde_json::json!({ "error": format!("{}", e) })),
     }
 }
 
 /// Auto-tag projects based on name, description, and tech stack
 fn auto_tag_projects(projects: &mut [Project]) {
     let tag_keywords: &[(&str, &[&str])] = &[
-        ("ai", &["ai", "llm", "gpt", "claude", "codex", "agent", "neural", "ml", "machine learning", "openai", "anthropic", "pytorch", "tensorflow"]),
-        ("web", &["website", "landing", "frontend", "react", "next", "svelte", "html", "css", "tailwind", "vue", "angular", "sveltekit"]),
-        ("api", &["api", "rest", "graphql", "endpoint", "server", "express", "axum", "hono", "fastapi"]),
-        ("cli", &["cli", "terminal", "command line", "command-line", "shell", "bash"]),
-        ("devops", &["docker", "kubernetes", "k8s", "ci/cd", "deploy", "infra", "terraform", "ansible", "helm", "umbrel"]),
-        ("mobile", &["ios", "android", "mobile", "swift", "kotlin", "react native", "flutter"]),
-        ("data", &["database", "postgres", "sqlite", "redis", "mongo", "data", "analytics", "scraping", "crawler"]),
-        ("blockchain", &["blockchain", "web3", "solana", "ethereum", "crypto", "token", "nft", "rwa", "smart contract"]),
-        ("seo", &["seo", "search engine", "sitemap", "analytics", "tracking"]),
-        ("auth", &["auth", "login", "oauth", "jwt", "session", "credential", "password"]),
-        ("bot", &["bot", "telegram", "whatsapp", "discord", "slack", "chat", "messaging"]),
-        ("automation", &["automat", "workflow", "cron", "schedule", "scrape", "crawl", "hook"]),
+        (
+            "ai",
+            &[
+                "ai",
+                "llm",
+                "gpt",
+                "claude",
+                "codex",
+                "agent",
+                "neural",
+                "ml",
+                "machine learning",
+                "openai",
+                "anthropic",
+                "pytorch",
+                "tensorflow",
+            ],
+        ),
+        (
+            "web",
+            &[
+                "website",
+                "landing",
+                "frontend",
+                "react",
+                "next",
+                "svelte",
+                "html",
+                "css",
+                "tailwind",
+                "vue",
+                "angular",
+                "sveltekit",
+            ],
+        ),
+        (
+            "api",
+            &[
+                "api", "rest", "graphql", "endpoint", "server", "express", "axum", "hono",
+                "fastapi",
+            ],
+        ),
+        (
+            "cli",
+            &[
+                "cli",
+                "terminal",
+                "command line",
+                "command-line",
+                "shell",
+                "bash",
+            ],
+        ),
+        (
+            "devops",
+            &[
+                "docker",
+                "kubernetes",
+                "k8s",
+                "ci/cd",
+                "deploy",
+                "infra",
+                "terraform",
+                "ansible",
+                "helm",
+                "umbrel",
+            ],
+        ),
+        (
+            "mobile",
+            &[
+                "ios",
+                "android",
+                "mobile",
+                "swift",
+                "kotlin",
+                "react native",
+                "flutter",
+            ],
+        ),
+        (
+            "data",
+            &[
+                "database",
+                "postgres",
+                "sqlite",
+                "redis",
+                "mongo",
+                "data",
+                "analytics",
+                "scraping",
+                "crawler",
+            ],
+        ),
+        (
+            "blockchain",
+            &[
+                "blockchain",
+                "web3",
+                "solana",
+                "ethereum",
+                "crypto",
+                "token",
+                "nft",
+                "rwa",
+                "smart contract",
+            ],
+        ),
+        (
+            "seo",
+            &["seo", "search engine", "sitemap", "analytics", "tracking"],
+        ),
+        (
+            "auth",
+            &[
+                "auth",
+                "login",
+                "oauth",
+                "jwt",
+                "session",
+                "credential",
+                "password",
+            ],
+        ),
+        (
+            "bot",
+            &[
+                "bot",
+                "telegram",
+                "whatsapp",
+                "discord",
+                "slack",
+                "chat",
+                "messaging",
+            ],
+        ),
+        (
+            "automation",
+            &[
+                "automat", "workflow", "cron", "schedule", "scrape", "crawl", "hook",
+            ],
+        ),
         ("game", &["game", "rpg", "player", "level", "score"]),
-        ("docs", &["documentation", "readme", "wiki", "knowledge", "obsidian", "note"]),
-        ("finance", &["tax", "invoice", "payment", "billing", "finance", "accounting", "portfolio"]),
+        (
+            "docs",
+            &[
+                "documentation",
+                "readme",
+                "wiki",
+                "knowledge",
+                "obsidian",
+                "note",
+            ],
+        ),
+        (
+            "finance",
+            &[
+                "tax",
+                "invoice",
+                "payment",
+                "billing",
+                "finance",
+                "accounting",
+                "portfolio",
+            ],
+        ),
     ];
 
     for project in projects.iter_mut() {
@@ -976,16 +1198,89 @@ fn auto_tag_projects(projects: &mut [Project]) {
 
 /// Extract significant keywords from a description for domain matching
 fn domain_keywords(text: &str) -> Vec<String> {
-    let stopwords = ["the", "and", "for", "with", "from", "that", "this", "are", "was", "not",
-        "you", "your", "has", "have", "had", "but", "all", "can", "will", "one", "our",
-        "out", "use", "how", "its", "let", "may", "who", "did", "get", "she", "her",
-        "him", "his", "old", "new", "now", "way", "each", "make", "like", "just",
-        "over", "such", "take", "than", "them", "very", "when", "what", "some", "into",
-        "been", "more", "other", "which", "about", "would", "their", "these", "could",
-        "project", "using", "based", "built", "also", "here", "https", "http", "www",
-        "com", "org", "github", "description", "provided", "none", "file", "code"];
+    let stopwords = [
+        "the",
+        "and",
+        "for",
+        "with",
+        "from",
+        "that",
+        "this",
+        "are",
+        "was",
+        "not",
+        "you",
+        "your",
+        "has",
+        "have",
+        "had",
+        "but",
+        "all",
+        "can",
+        "will",
+        "one",
+        "our",
+        "out",
+        "use",
+        "how",
+        "its",
+        "let",
+        "may",
+        "who",
+        "did",
+        "get",
+        "she",
+        "her",
+        "him",
+        "his",
+        "old",
+        "new",
+        "now",
+        "way",
+        "each",
+        "make",
+        "like",
+        "just",
+        "over",
+        "such",
+        "take",
+        "than",
+        "them",
+        "very",
+        "when",
+        "what",
+        "some",
+        "into",
+        "been",
+        "more",
+        "other",
+        "which",
+        "about",
+        "would",
+        "their",
+        "these",
+        "could",
+        "project",
+        "using",
+        "based",
+        "built",
+        "also",
+        "here",
+        "https",
+        "http",
+        "www",
+        "com",
+        "org",
+        "github",
+        "description",
+        "provided",
+        "none",
+        "file",
+        "code",
+    ];
     let lower = text.to_lowercase();
-    lower.split(|c: char| !c.is_alphanumeric())
+    lower
+        .split(|c: char| !c.is_alphanumeric())
         .filter(|w| w.len() >= 4 && !stopwords.contains(w))
         .map(|w| w.to_string())
         .collect::<std::collections::HashSet<_>>()
@@ -999,11 +1294,14 @@ fn compute_graph(projects: &[Project]) -> serde_json::Value {
     let mut edges = Vec::new();
 
     // Pre-compute per-project data
-    let keywords: Vec<Vec<String>> = projects.iter().map(|p| {
-        // Cap description to 200 chars to avoid noisy long descriptions
-        let desc_cap: String = p.description.chars().take(200).collect();
-        domain_keywords(&format!("{} {}", p.name, desc_cap))
-    }).collect();
+    let keywords: Vec<Vec<String>> = projects
+        .iter()
+        .map(|p| {
+            // Cap description to 200 chars to avoid noisy long descriptions
+            let desc_cap: String = p.description.chars().take(200).collect();
+            domain_keywords(&format!("{} {}", p.name, desc_cap))
+        })
+        .collect();
 
     // Build nodes
     for (i, p) in projects.iter().enumerate() {
@@ -1032,36 +1330,62 @@ fn compute_graph(projects: &[Project]) -> serde_json::Value {
             let dj = projects[j].description.to_lowercase();
             if ni.len() >= 4 && dj.contains(&ni) {
                 weight += 6.0;
-                reasons.push(format!("{} mentioned in {}", projects[i].name, projects[j].name));
+                reasons.push(format!(
+                    "{} mentioned in {}",
+                    projects[i].name, projects[j].name
+                ));
             }
             if nj.len() >= 4 && di.contains(&nj) {
                 weight += 6.0;
-                reasons.push(format!("{} mentioned in {}", projects[j].name, projects[i].name));
+                reasons.push(format!(
+                    "{} mentioned in {}",
+                    projects[j].name, projects[i].name
+                ));
             }
 
             // 3. Shared domain keywords from descriptions (goal similarity)
-            let shared_kw: Vec<&String> = keywords[i].iter()
+            let shared_kw: Vec<&String> = keywords[i]
+                .iter()
                 .filter(|kw| keywords[j].contains(kw))
                 .collect();
             let kw_score = (shared_kw.len() as f32).min(5.0);
             if kw_score >= 3.0 {
                 weight += kw_score;
-                reasons.push(format!("shared: {}", shared_kw.iter().take(3).map(|s| s.as_str()).collect::<Vec<_>>().join(", ")));
+                reasons.push(format!(
+                    "shared: {}",
+                    shared_kw
+                        .iter()
+                        .take(3)
+                        .map(|s| s.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
             }
 
             // 4. Shared tags — only count if there's already another signal
             //    (prevents generic tag-only connections like "both tagged ai")
-            let shared_tags: Vec<&String> = projects[i].tags.iter()
+            let shared_tags: Vec<&String> = projects[i]
+                .tags
+                .iter()
                 .filter(|t| projects[j].tags.contains(t))
                 .collect();
             if !shared_tags.is_empty() && weight > 0.0 {
                 weight += shared_tags.len() as f32;
-                reasons.push(format!("tags: {}", shared_tags.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")));
+                reasons.push(format!(
+                    "tags: {}",
+                    shared_tags
+                        .iter()
+                        .map(|s| s.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
             }
 
             // 5. Obsidian idea linked to implementation
-            if (matches!(projects[i].project_type, ProjectType::Obsidian) && !matches!(projects[j].project_type, ProjectType::Obsidian))
-                || (!matches!(projects[i].project_type, ProjectType::Obsidian) && matches!(projects[j].project_type, ProjectType::Obsidian))
+            if (matches!(projects[i].project_type, ProjectType::Obsidian)
+                && !matches!(projects[j].project_type, ProjectType::Obsidian))
+                || (!matches!(projects[i].project_type, ProjectType::Obsidian)
+                    && matches!(projects[j].project_type, ProjectType::Obsidian))
             {
                 // Already linked via name matching — check if remaining connection exists
                 if weight > 0.0 {
@@ -1086,7 +1410,12 @@ fn compute_graph(projects: &[Project]) -> serde_json::Value {
 }
 
 // ── Agent Runner (Swarm Integration) ───────────────────────────────────
+//
+// All agent runner code is gated on the `swarm` feature so the binary builds
+// and ships without the local `../swarm` workspace member. Enable with
+// `cargo build --features swarm` for the full experience.
 
+#[cfg(feature = "swarm")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct AgentJob {
     id: String,
@@ -1111,6 +1440,7 @@ struct AgentJob {
 
 #[derive(Clone)]
 struct AppState {
+    #[cfg(feature = "swarm")]
     jobs: Arc<Mutex<Vec<AgentJob>>>,
     map_file: PathBuf,
 }
@@ -1120,7 +1450,14 @@ struct AppState {
 const PREVIEW_MAX_DEPTH: usize = 6;
 const PREVIEW_FILE_BYTES: u64 = 1024 * 1024;
 const PREVIEW_SKIP_DIRS: &[&str] = &[
-    "node_modules", ".git", "target", "__pycache__", ".venv", "venv", ".swarm", ".cache",
+    "node_modules",
+    ".git",
+    "target",
+    "__pycache__",
+    ".venv",
+    "venv",
+    ".swarm",
+    ".cache",
 ];
 
 #[derive(Serialize)]
@@ -1133,12 +1470,18 @@ struct FileNode {
 }
 
 fn walk_tree(p: &Path, depth: usize) -> Vec<FileNode> {
-    if depth >= PREVIEW_MAX_DEPTH { return Vec::new(); }
-    let Ok(entries) = std::fs::read_dir(p) else { return Vec::new(); };
+    if depth >= PREVIEW_MAX_DEPTH {
+        return Vec::new();
+    }
+    let Ok(entries) = std::fs::read_dir(p) else {
+        return Vec::new();
+    };
     let mut nodes: Vec<FileNode> = Vec::new();
     for e in entries.flatten() {
         let name = e.file_name().to_string_lossy().into_owned();
-        if PREVIEW_SKIP_DIRS.contains(&name.as_str()) { continue; }
+        if PREVIEW_SKIP_DIRS.contains(&name.as_str()) {
+            continue;
+        }
         if name.starts_with('.')
             && name != ".gitignore"
             && name != ".env.example"
@@ -1148,7 +1491,11 @@ fn walk_tree(p: &Path, depth: usize) -> Vec<FileNode> {
         }
         let path = e.path();
         let is_dir = path.is_dir();
-        let children = if is_dir { Some(walk_tree(&path, depth + 1)) } else { None };
+        let children = if is_dir {
+            Some(walk_tree(&path, depth + 1))
+        } else {
+            None
+        };
         nodes.push(FileNode {
             name,
             path: path.to_string_lossy().into_owned(),
@@ -1157,14 +1504,17 @@ fn walk_tree(p: &Path, depth: usize) -> Vec<FileNode> {
         });
     }
     nodes.sort_by(|a, b| {
-        b.is_dir.cmp(&a.is_dir)
+        b.is_dir
+            .cmp(&a.is_dir)
             .then(a.name.to_lowercase().cmp(&b.name.to_lowercase()))
     });
     nodes
 }
 
 #[derive(Deserialize)]
-struct TreeQuery { path: String }
+struct TreeQuery {
+    path: String,
+}
 
 async fn project_tree_api(
     axum::extract::Query(q): axum::extract::Query<TreeQuery>,
@@ -1184,7 +1534,10 @@ async fn project_tree_api(
 }
 
 #[derive(Deserialize)]
-struct FileQuery { root: String, path: String }
+struct FileQuery {
+    root: String,
+    path: String,
+}
 
 async fn project_file_api(
     axum::extract::Query(q): axum::extract::Query<FileQuery>,
@@ -1212,7 +1565,9 @@ async fn project_file_api(
     }
     match std::fs::read_to_string(&file) {
         Ok(c) => Json(serde_json::json!({ "content": c, "size": metadata.len() })),
-        Err(_) => Json(serde_json::json!({ "error": "Binary or non-UTF8 file", "size": metadata.len() })),
+        Err(_) => {
+            Json(serde_json::json!({ "error": "Binary or non-UTF8 file", "size": metadata.len() }))
+        }
     }
 }
 
@@ -1224,8 +1579,13 @@ fn purge_file_path(map_file: &Path) -> PathBuf {
 
 fn read_purged(map_file: &Path) -> std::collections::HashSet<String> {
     let path = purge_file_path(map_file);
-    let Ok(content) = std::fs::read_to_string(&path) else { return Default::default(); };
-    serde_json::from_str::<Vec<String>>(&content).unwrap_or_default().into_iter().collect()
+    let Ok(content) = std::fs::read_to_string(&path) else {
+        return Default::default();
+    };
+    serde_json::from_str::<Vec<String>>(&content)
+        .unwrap_or_default()
+        .into_iter()
+        .collect()
 }
 
 fn write_purged(map_file: &Path, set: &std::collections::HashSet<String>) -> Result<(), String> {
@@ -1251,7 +1611,8 @@ async fn purge_project_api(
     };
     let before = projects.len();
     let target = req.path.trim_end_matches('/').to_string();
-    let kept: Vec<Project> = projects.into_iter()
+    let kept: Vec<Project> = projects
+        .into_iter()
         .filter(|p| p.path.trim_end_matches('/') != target)
         .collect();
     let removed = before - kept.len();
@@ -1264,7 +1625,9 @@ async fn purge_project_api(
     if let Err(e) = save_map(&kept, &state.map_file) {
         return Json(serde_json::json!({ "ok": false, "error": e }));
     }
-    Json(serde_json::json!({ "ok": true, "removed": removed, "remaining": kept.len(), "purged_total": purged.len() }))
+    Json(
+        serde_json::json!({ "ok": true, "removed": removed, "remaining": kept.len(), "purged_total": purged.len() }),
+    )
 }
 
 async fn purged_list_api(State(state): State<AppState>) -> Json<Vec<String>> {
@@ -1288,13 +1651,13 @@ async fn restore_project_api(
     if let Err(e) = write_purged(&state.map_file, &purged) {
         return Json(serde_json::json!({ "ok": false, "error": e }));
     }
-    Json(serde_json::json!({ "ok": true, "removed_from_blocklist": removed, "remaining": purged.len() }))
+    Json(
+        serde_json::json!({ "ok": true, "removed_from_blocklist": removed, "remaining": purged.len() }),
+    )
 }
 
 /// API endpoint: re-run auto-categorization against the existing map and save it
-async fn recategorize_api(
-    State(state): State<AppState>,
-) -> Json<serde_json::Value> {
+async fn recategorize_api(State(state): State<AppState>) -> Json<serde_json::Value> {
     let mut projects = match load_map(&state.map_file) {
         Ok(p) => p,
         Err(e) => return Json(serde_json::json!({ "ok": false, "error": e })),
@@ -1308,6 +1671,7 @@ async fn recategorize_api(
     Json(serde_json::json!({ "ok": true, "projects": count, "tagged": tagged }))
 }
 
+#[cfg(feature = "swarm")]
 #[derive(Deserialize)]
 struct AgentRunRequest {
     project_path: String,
@@ -1320,10 +1684,20 @@ struct AgentRunRequest {
     max_budget_usd: f64,
 }
 
-fn default_model() -> String { "sonnet".to_string() }
-fn default_permission_mode() -> String { "acceptEdits".to_string() }
-fn default_budget() -> f64 { 1.0 }
+#[cfg(feature = "swarm")]
+fn default_model() -> String {
+    "sonnet".to_string()
+}
+#[cfg(feature = "swarm")]
+fn default_permission_mode() -> String {
+    "acceptEdits".to_string()
+}
+#[cfg(feature = "swarm")]
+fn default_budget() -> f64 {
+    1.0
+}
 
+#[cfg(feature = "swarm")]
 async fn agent_run(
     State(state): State<AppState>,
     Json(req): Json<AgentRunRequest>,
@@ -1343,7 +1717,9 @@ async fn agent_run(
         permission_mode: req.permission_mode.clone(),
         max_budget_usd: req.max_budget_usd,
         status: "running".to_string(),
-        started_at: chrono::Local::now().format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+        started_at: chrono::Local::now()
+            .format("%Y-%m-%dT%H:%M:%SZ")
+            .to_string(),
         finished_at: None,
         cost_usd: 0.0,
         tool_calls: 0,
@@ -1371,9 +1747,14 @@ async fn agent_run(
 
     tokio::spawn(async move {
         let result = run_swarm_task(
-            &job_id_clone, &project_path, &prompt,
-            &model, &permission_mode, max_budget,
-        ).await;
+            &job_id_clone,
+            &project_path,
+            &prompt,
+            &model,
+            &permission_mode,
+            max_budget,
+        )
+        .await;
 
         let mut jobs = jobs.lock().await;
         if let Some(job) = jobs.iter_mut().find(|j| j.id == job_id_clone) {
@@ -1393,13 +1774,18 @@ async fn agent_run(
                     job.error = Some(e);
                 }
             }
-            job.finished_at = Some(chrono::Local::now().format("%Y-%m-%dT%H:%M:%SZ").to_string());
+            job.finished_at = Some(
+                chrono::Local::now()
+                    .format("%Y-%m-%dT%H:%M:%SZ")
+                    .to_string(),
+            );
         }
     });
 
     Json(serde_json::json!({ "job_id": job_id }))
 }
 
+#[cfg(feature = "swarm")]
 struct SwarmOutcome {
     cost_usd: f64,
     tool_calls: u32,
@@ -1410,9 +1796,14 @@ struct SwarmOutcome {
     changed_files: Vec<String>,
 }
 
+#[cfg(feature = "swarm")]
 async fn run_swarm_task(
-    job_id: &str, project_path: &str, prompt: &str,
-    model: &str, permission_mode: &str, max_budget: f64,
+    job_id: &str,
+    project_path: &str,
+    prompt: &str,
+    model: &str,
+    permission_mode: &str,
+    max_budget: f64,
 ) -> Result<SwarmOutcome, String> {
     use swarm::config::*;
     use swarm::domain::*;
@@ -1430,7 +1821,11 @@ async fn run_swarm_task(
             backend_ref: None,
         },
         policy: TaskPolicy {
-            retry_policy: RetryPolicy { max_retries: 0, retry_on_timeout: false, retry_on_cli_error: false },
+            retry_policy: RetryPolicy {
+                max_retries: 0,
+                retry_on_timeout: false,
+                retry_on_cli_error: false,
+            },
             failure_policy: FailurePolicy::SkipDependents,
             cleanup_policy: CleanupPolicy::OnSuccess,
             timeout_action: TimeoutAction::FailImmediately,
@@ -1438,8 +1833,12 @@ async fn run_swarm_task(
         },
         execution: TaskExecutionConfig {
             allowed_tools: vec![
-                "Read".into(), "Edit".into(), "Write".into(),
-                "Bash".into(), "Glob".into(), "Grep".into(),
+                "Read".into(),
+                "Edit".into(),
+                "Write".into(),
+                "Bash".into(),
+                "Glob".into(),
+                "Grep".into(),
             ],
             system_prompt_append: None,
             model: Some(model.to_string()),
@@ -1459,9 +1858,13 @@ async fn run_swarm_task(
         .current_dir(project_path)
         .output()
         .ok()
-        .and_then(|o| if o.status.success() {
-            Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
-        } else { None })
+        .and_then(|o| {
+            if o.status.success() {
+                Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
+            } else {
+                None
+            }
+        })
         .unwrap_or_else(|| "main".to_string());
 
     let config = SwarmConfig {
@@ -1489,7 +1892,10 @@ async fn run_swarm_task(
 
     let graph = TaskGraph::new(vec![task]).map_err(|e| format!("{}", e))?;
     let orchestrator = Orchestrator::new(project_path, config).map_err(|e| format!("{}", e))?;
-    let snapshot = orchestrator.run_graph(graph).await.map_err(|e| format!("{}", e))?;
+    let snapshot = orchestrator
+        .run_graph(graph)
+        .await
+        .map_err(|e| format!("{}", e))?;
 
     // Extract results from snapshot
     if let Some(record) = snapshot.tasks.get(job_id) {
@@ -1508,13 +1914,13 @@ async fn run_swarm_task(
     }
 }
 
-async fn agent_jobs(
-    State(state): State<AppState>,
-) -> Json<Vec<AgentJob>> {
+#[cfg(feature = "swarm")]
+async fn agent_jobs(State(state): State<AppState>) -> Json<Vec<AgentJob>> {
     let jobs = state.jobs.lock().await;
     Json(jobs.clone())
 }
 
+#[cfg(feature = "swarm")]
 async fn agent_job_detail(
     State(state): State<AppState>,
     axum::extract::Path(id): axum::extract::Path<String>,
@@ -1527,6 +1933,7 @@ async fn agent_job_detail(
     }
 }
 
+#[cfg(feature = "swarm")]
 async fn agent_job_log(
     State(state): State<AppState>,
     axum::extract::Path(id): axum::extract::Path<String>,
@@ -1595,14 +2002,21 @@ struct SkillFrontmatter {
 
 /// Parse YAML frontmatter from a SKILL.md file
 fn parse_skill_frontmatter(content: &str) -> SkillFrontmatter {
-    let mut fm = SkillFrontmatter { name: None, description: None, version: None, repository: None };
+    let mut fm = SkillFrontmatter {
+        name: None,
+        description: None,
+        version: None,
+        repository: None,
+    };
     let mut lines = content.lines();
     if lines.next().map(|l| l.trim()) != Some("---") {
         return fm;
     }
     for line in lines {
         let trimmed = line.trim();
-        if trimmed == "---" { break; }
+        if trimmed == "---" {
+            break;
+        }
         let strip = |s: &str| s.trim().trim_matches('"').trim_matches('\'').to_string();
         if let Some(rest) = trimmed.strip_prefix("name:") {
             fm.name = Some(strip(rest));
@@ -1635,7 +2049,8 @@ fn read_skill(skill_dir: &Path) -> Option<SkillRead> {
     let content = std::fs::read_to_string(&skill_md).ok()?;
     let fm = parse_skill_frontmatter(&content);
     let name = fm.name.unwrap_or_else(|| {
-        skill_dir.file_name()
+        skill_dir
+            .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| "unknown".to_string())
     });
@@ -1669,9 +2084,15 @@ fn load_marketplace_repos(home: &Path) -> std::collections::HashMap<String, Stri
     use std::collections::HashMap;
     let mut map = HashMap::new();
     let path = home.join(".claude/plugins/known_marketplaces.json");
-    let Ok(content) = std::fs::read_to_string(&path) else { return map; };
-    let Ok(json): Result<serde_json::Value, _> = serde_json::from_str(&content) else { return map; };
-    let Some(obj) = json.as_object() else { return map; };
+    let Ok(content) = std::fs::read_to_string(&path) else {
+        return map;
+    };
+    let Ok(json): Result<serde_json::Value, _> = serde_json::from_str(&content) else {
+        return map;
+    };
+    let Some(obj) = json.as_object() else {
+        return map;
+    };
     for (mp_name, info) in obj {
         let source = info.get("source").and_then(|s| s.as_object());
         if let Some(s) = source {
@@ -1692,26 +2113,42 @@ fn load_marketplace_repos(home: &Path) -> std::collections::HashMap<String, Stri
 fn scan_plugin_skills(home: &Path) -> Vec<(String, String, SkillRead, PathBuf)> {
     let mut out = Vec::new();
     let cache_root = home.join(".claude/plugins/cache");
-    let Ok(marketplaces) = std::fs::read_dir(&cache_root) else { return out; };
+    let Ok(marketplaces) = std::fs::read_dir(&cache_root) else {
+        return out;
+    };
     for mp_entry in marketplaces.flatten() {
         let mp_name = mp_entry.file_name().to_string_lossy().into_owned();
         let mp_path = mp_entry.path();
-        if !mp_path.is_dir() { continue; }
+        if !mp_path.is_dir() {
+            continue;
+        }
         // Walk plugins in this marketplace
-        let Ok(plugins) = std::fs::read_dir(&mp_path) else { continue; };
+        let Ok(plugins) = std::fs::read_dir(&mp_path) else {
+            continue;
+        };
         for plugin_entry in plugins.flatten() {
             let plugin_path = plugin_entry.path();
-            if !plugin_path.is_dir() { continue; }
+            if !plugin_path.is_dir() {
+                continue;
+            }
             // Walk versions
-            let Ok(versions) = std::fs::read_dir(&plugin_path) else { continue; };
+            let Ok(versions) = std::fs::read_dir(&plugin_path) else {
+                continue;
+            };
             for version_entry in versions.flatten() {
                 let version_path = version_entry.path();
-                if !version_path.is_dir() { continue; }
+                if !version_path.is_dir() {
+                    continue;
+                }
                 let version = version_entry.file_name().to_string_lossy().into_owned();
                 let skills_root = version_path.join("skills");
-                if !skills_root.exists() { continue; }
+                if !skills_root.exists() {
+                    continue;
+                }
                 for (mut sr, sp) in scan_skills_dir(&skills_root) {
-                    if sr.version.is_none() { sr.version = Some(version.clone()); }
+                    if sr.version.is_none() {
+                        sr.version = Some(version.clone());
+                    }
                     out.push((mp_name.clone(), version.clone(), sr, sp));
                 }
             }
@@ -1729,7 +2166,9 @@ fn name_prefix_group(name: &str) -> String {
         return before.to_string();
     }
     if let Some((before, _)) = name.split_once('-') {
-        if before.len() >= 2 { return before.to_string(); }
+        if before.len() >= 2 {
+            return before.to_string();
+        }
     }
     "core".to_string()
 }
@@ -1743,52 +2182,28 @@ async fn skills_api(State(state): State<AppState>) -> Json<Vec<SkillGroup>> {
 
     // 1. Global skills at ~/.claude/skills/
     for (sr, path) in scan_skills_dir(&home.join(".claude/skills")) {
-        entries.insert(sr.name.clone(), SkillEntry {
-            name: sr.name,
-            description: sr.description,
-            version: sr.version,
-            has_global: true,
-            global_hash: Some(sr.hash),
-            global_path: Some(path.to_string_lossy().into_owned()),
-            projects: Vec::new(),
-            group: String::new(),    // assigned later
-            repo_url: sr.repository, // may get overridden by marketplace lookup
-        });
+        entries.insert(
+            sr.name.clone(),
+            SkillEntry {
+                name: sr.name,
+                description: sr.description,
+                version: sr.version,
+                has_global: true,
+                global_hash: Some(sr.hash),
+                global_path: Some(path.to_string_lossy().into_owned()),
+                projects: Vec::new(),
+                group: String::new(),    // assigned later
+                repo_url: sr.repository, // may get overridden by marketplace lookup
+            },
+        );
     }
 
     // 2. Plugin skills (in cache) — these may already exist as global copies; merge
     for (mp_name, _version, sr, path) in scan_plugin_skills(&home) {
         let repo = marketplace_repos.get(&mp_name).cloned();
-        let entry = entries.entry(sr.name.clone()).or_insert_with(|| SkillEntry {
-            name: sr.name.clone(),
-            description: sr.description.clone(),
-            version: sr.version.clone(),
-            has_global: false,
-            global_hash: None,
-            global_path: None,
-            projects: Vec::new(),
-            group: mp_name.clone(),
-            repo_url: repo.clone(),
-        });
-        // Prefer marketplace-provided repo + mark group
-        entry.group = mp_name.clone();
-        if entry.repo_url.is_none() { entry.repo_url = repo; }
-        if entry.global_path.is_none() {
-            entry.global_path = Some(path.to_string_lossy().into_owned());
-        }
-        if entry.version.is_none() { entry.version = sr.version; }
-    }
-
-    // 3. Project-level skills
-    let projects = load_map(&state.map_file).unwrap_or_default();
-    for project in projects.iter() {
-        if !matches!(project.project_type, ProjectType::Git | ProjectType::Folder | ProjectType::Idea) {
-            continue;
-        }
-        let pskills = PathBuf::from(&project.path).join(".claude/skills");
-        if !pskills.exists() { continue; }
-        for (sr, skill_path) in scan_skills_dir(&pskills) {
-            let entry = entries.entry(sr.name.clone()).or_insert_with(|| SkillEntry {
+        let entry = entries
+            .entry(sr.name.clone())
+            .or_insert_with(|| SkillEntry {
                 name: sr.name.clone(),
                 description: sr.description.clone(),
                 version: sr.version.clone(),
@@ -1796,9 +2211,49 @@ async fn skills_api(State(state): State<AppState>) -> Json<Vec<SkillGroup>> {
                 global_hash: None,
                 global_path: None,
                 projects: Vec::new(),
-                group: String::new(),
-                repo_url: sr.repository.clone(),
+                group: mp_name.clone(),
+                repo_url: repo.clone(),
             });
+        // Prefer marketplace-provided repo + mark group
+        entry.group = mp_name.clone();
+        if entry.repo_url.is_none() {
+            entry.repo_url = repo;
+        }
+        if entry.global_path.is_none() {
+            entry.global_path = Some(path.to_string_lossy().into_owned());
+        }
+        if entry.version.is_none() {
+            entry.version = sr.version;
+        }
+    }
+
+    // 3. Project-level skills
+    let projects = load_map(&state.map_file).unwrap_or_default();
+    for project in projects.iter() {
+        if !matches!(
+            project.project_type,
+            ProjectType::Git | ProjectType::Folder | ProjectType::Idea
+        ) {
+            continue;
+        }
+        let pskills = PathBuf::from(&project.path).join(".claude/skills");
+        if !pskills.exists() {
+            continue;
+        }
+        for (sr, skill_path) in scan_skills_dir(&pskills) {
+            let entry = entries
+                .entry(sr.name.clone())
+                .or_insert_with(|| SkillEntry {
+                    name: sr.name.clone(),
+                    description: sr.description.clone(),
+                    version: sr.version.clone(),
+                    has_global: false,
+                    global_hash: None,
+                    global_path: None,
+                    projects: Vec::new(),
+                    group: String::new(),
+                    repo_url: sr.repository.clone(),
+                });
             if entry.description.is_empty() && !sr.description.is_empty() {
                 entry.description = sr.description.clone();
             }
@@ -1809,7 +2264,8 @@ async fn skills_api(State(state): State<AppState>) -> Json<Vec<SkillGroup>> {
                 Some(g) if g == sr.hash => "synced",
                 Some(_) => "diverged",
                 None => "no-global",
-            }.to_string();
+            }
+            .to_string();
             entry.projects.push(SkillUsage {
                 project: project.name.clone(),
                 path: project.path.clone(),
@@ -1825,17 +2281,20 @@ async fn skills_api(State(state): State<AppState>) -> Json<Vec<SkillGroup>> {
     let mut prefix_counts: HashMap<String, usize> = HashMap::new();
     for entry in entries.values() {
         if entry.group.is_empty() {
-            *prefix_counts.entry(name_prefix_group(&entry.name)).or_insert(0) += 1;
+            *prefix_counts
+                .entry(name_prefix_group(&entry.name))
+                .or_insert(0) += 1;
         }
     }
     for entry in entries.values_mut() {
         if entry.group.is_empty() {
             let prefix = name_prefix_group(&entry.name);
-            entry.group = if prefix == "core" || prefix_counts.get(&prefix).copied().unwrap_or(0) < 2 {
-                "core".to_string()
-            } else {
-                prefix
-            };
+            entry.group =
+                if prefix == "core" || prefix_counts.get(&prefix).copied().unwrap_or(0) < 2 {
+                    "core".to_string()
+                } else {
+                    prefix
+                };
         }
     }
 
@@ -1844,12 +2303,16 @@ async fn skills_api(State(state): State<AppState>) -> Json<Vec<SkillGroup>> {
     for (_, entry) in entries.into_iter() {
         let group_name = entry.group.clone();
         let group_repo = entry.repo_url.clone();
-        let g = group_map.entry(group_name.clone()).or_insert_with(|| SkillGroup {
-            name: group_name,
-            repo_url: None,
-            skills: Vec::new(),
-        });
-        if g.repo_url.is_none() && group_repo.is_some() { g.repo_url = group_repo; }
+        let g = group_map
+            .entry(group_name.clone())
+            .or_insert_with(|| SkillGroup {
+                name: group_name,
+                repo_url: None,
+                skills: Vec::new(),
+            });
+        if g.repo_url.is_none() && group_repo.is_some() {
+            g.repo_url = group_repo;
+        }
         g.skills.push(entry);
     }
 
@@ -1857,7 +2320,9 @@ async fn skills_api(State(state): State<AppState>) -> Json<Vec<SkillGroup>> {
     let mut groups: Vec<SkillGroup> = group_map.into_values().collect();
     for g in groups.iter_mut() {
         g.skills.sort_by(|a, b| {
-            b.projects.len().cmp(&a.projects.len())
+            b.projects
+                .len()
+                .cmp(&a.projects.len())
                 .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
         });
     }
@@ -1865,7 +2330,8 @@ async fn skills_api(State(state): State<AppState>) -> Json<Vec<SkillGroup>> {
         // "core" goes last; otherwise by skill count desc, then name
         let a_core = a.name == "core";
         let b_core = b.name == "core";
-        a_core.cmp(&b_core)
+        a_core
+            .cmp(&b_core)
             .then_with(|| b.skills.len().cmp(&a.skills.len()))
             .then_with(|| a.name.cmp(&b.name))
     });
@@ -1877,7 +2343,17 @@ async fn main() {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Survey { path, output, github, gitlab, watch, obsidian, obsidian_folder, obsidian_vault, obsidian_sync } => {
+        Commands::Survey {
+            path,
+            output,
+            github,
+            gitlab,
+            watch,
+            obsidian,
+            obsidian_folder,
+            obsidian_vault,
+            obsidian_sync,
+        } => {
             loop {
                 eprintln!("Surveying {}...", path.display());
 
@@ -1905,15 +2381,24 @@ async fn main() {
                             .output();
                         match sync_result {
                             Ok(o) if o.status.success() => eprintln!("Obsidian sync complete."),
-                            Ok(o) => eprintln!("Warning: ob sync failed: {}", String::from_utf8_lossy(&o.stderr)),
+                            Ok(o) => eprintln!(
+                                "Warning: ob sync failed: {}",
+                                String::from_utf8_lossy(&o.stderr)
+                            ),
                             Err(_) => eprintln!("Warning: `ob` command not found. Skipping sync."),
                         }
                     }
-                    let vault_name = obsidian_vault.as_deref()
+                    let vault_name = obsidian_vault
+                        .as_deref()
                         .or_else(|| vault_path.file_name().and_then(|n| n.to_str()))
                         .unwrap_or("vault");
-                    eprintln!("Scanning Obsidian vault '{}' at {}...", vault_name, vault_path.display());
-                    let obs_projects = scan_obsidian_vault(vault_path, &obsidian_folder, vault_name);
+                    eprintln!(
+                        "Scanning Obsidian vault '{}' at {}...",
+                        vault_name,
+                        vault_path.display()
+                    );
+                    let obs_projects =
+                        scan_obsidian_vault(vault_path, &obsidian_folder, vault_name);
                     eprintln!("Found {} Obsidian notes/ideas", obs_projects.len());
                     all_projects.extend(obs_projects);
                 }
@@ -1934,10 +2419,18 @@ async fn main() {
 
                 if let Err(e) = save_map(&all_projects, &output) {
                     eprintln!("Error: {}", e);
-                    if watch.is_none() { std::process::exit(1); }
+                    if watch.is_none() {
+                        std::process::exit(1);
+                    }
                 } else {
-                    let github_count = all_projects.iter().filter(|p| matches!(p.project_type, ProjectType::GitHub)).count();
-                    let dirty_count = all_projects.iter().filter(|p| p.git_status.as_deref() == Some("uncommitted")).count();
+                    let github_count = all_projects
+                        .iter()
+                        .filter(|p| matches!(p.project_type, ProjectType::GitHub))
+                        .count();
+                    let dirty_count = all_projects
+                        .iter()
+                        .filter(|p| p.git_status.as_deref() == Some("uncommitted"))
+                        .count();
 
                     println!("[{}] {} projects ({} local, {} github, {} merged, {} purged, {} dirty) -> {}",
                         chrono::Local::now().format("%H:%M:%S"),
@@ -1955,7 +2448,11 @@ async fn main() {
                 }
             }
         }
-        Commands::Serve { port, bind, map_file } => {
+        Commands::Serve {
+            port,
+            bind,
+            map_file,
+        } => {
             // Read the map file on each request so browser refresh picks up changes
             let map_path = map_file.clone();
             let serve_map = move || {
@@ -1983,6 +2480,7 @@ async fn main() {
             };
 
             let app_state = AppState {
+                #[cfg(feature = "swarm")]
                 jobs: Arc::new(Mutex::new(Vec::new())),
                 map_file: map_file.clone(),
             };
@@ -1992,28 +2490,273 @@ async fn main() {
                 .route("/api/graph", get(serve_graph))
                 .route("/api/open-terminal", post(open_terminal))
                 .route("/api/git-status", get(get_git_status_api))
-                .route("/api/agent/run", post(agent_run))
-                .route("/api/agent/jobs", get(agent_jobs))
-                .route("/api/agent/job/{id}", get(agent_job_detail))
-                .route("/api/agent/job/{id}/log", get(agent_job_log))
                 .route("/api/categorize", post(recategorize_api))
                 .route("/api/skills", get(skills_api))
                 .route("/api/project/purge", post(purge_project_api))
                 .route("/api/project/restore", post(restore_project_api))
                 .route("/api/purged", get(purged_list_api))
                 .route("/api/project/tree", get(project_tree_api))
-                .route("/api/project/file", get(project_file_api))
+                .route("/api/project/file", get(project_file_api));
+
+            #[cfg(feature = "swarm")]
+            let app = app
+                .route("/api/agent/run", post(agent_run))
+                .route("/api/agent/jobs", get(agent_jobs))
+                .route("/api/agent/job/{id}", get(agent_job_detail))
+                .route("/api/agent/job/{id}/log", get(agent_job_log));
+
+            let app = app
                 .with_state(app_state)
                 .fallback_service(ServeDir::new("dist"));
 
             let addr = SocketAddr::from((bind, port));
             println!("Mercator map available at http://{}", addr);
             println!("Press Ctrl+C to stop");
-            
-            let listener = tokio::net::TcpListener::bind(addr).await
+
+            let listener = tokio::net::TcpListener::bind(addr)
+                .await
                 .expect("Failed to bind to port");
-            axum::serve(listener, app).await
-                .expect("Server error");
+            axum::serve(listener, app).await.expect("Server error");
         }
+    }
+}
+
+// ── Tests ───────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── strip_inline_md ────────────────────────────────────────────────
+
+    #[test]
+    fn strip_inline_md_keeps_link_text_drops_url() {
+        assert_eq!(strip_inline_md("see [docs](https://x.com/y)"), "see docs");
+    }
+
+    #[test]
+    fn strip_inline_md_strips_emphasis_markers() {
+        assert_eq!(
+            strip_inline_md("**bold** and *italic* and _under_"),
+            "bold and italic and under"
+        );
+    }
+
+    #[test]
+    fn strip_inline_md_drops_code_backticks() {
+        assert_eq!(strip_inline_md("`x` plain `y`"), "x plain y");
+    }
+
+    #[test]
+    fn strip_inline_md_passes_plain_text() {
+        assert_eq!(strip_inline_md("plain words 123"), "plain words 123");
+    }
+
+    // ── normalize_remote_url ───────────────────────────────────────────
+
+    #[test]
+    fn normalize_remote_url_strips_protocol_and_dot_git() {
+        assert_eq!(
+            normalize_remote_url("https://github.com/zot24/mercator.git"),
+            "github.com/zot24/mercator"
+        );
+    }
+
+    #[test]
+    fn normalize_remote_url_handles_ssh_form() {
+        assert_eq!(
+            normalize_remote_url("git@github.com:zot24/mercator.git"),
+            "github.com/zot24/mercator"
+        );
+    }
+
+    #[test]
+    fn normalize_remote_url_lowercases_and_trims_slash() {
+        assert_eq!(
+            normalize_remote_url("https://GitHub.com/zot24/Mercator/"),
+            "github.com/zot24/mercator"
+        );
+    }
+
+    // ── normalize_name ─────────────────────────────────────────────────
+
+    #[test]
+    fn normalize_name_strips_separators_and_case() {
+        assert_eq!(normalize_name("My-Cool_Project Name"), "mycoolprojectname");
+    }
+
+    // ── name_prefix_group ──────────────────────────────────────────────
+
+    #[test]
+    fn name_prefix_group_uses_first_hyphen_segment() {
+        assert_eq!(name_prefix_group("gsd-debug"), "gsd");
+        assert_eq!(name_prefix_group("managing-umami"), "managing");
+    }
+
+    #[test]
+    fn name_prefix_group_unwraps_plugin_namespace() {
+        // Plugin-namespaced form: "<marketplace>:<skill>" — group is the full
+        // marketplace name (preserves hyphens), not the first hyphen segment.
+        assert_eq!(
+            name_prefix_group("zot24-skills:claude-code-expert"),
+            "zot24-skills"
+        );
+        assert_eq!(name_prefix_group("plugin:skill"), "plugin");
+    }
+
+    #[test]
+    fn name_prefix_group_falls_back_to_core_for_short_or_no_prefix() {
+        assert_eq!(name_prefix_group("init"), "core");
+        assert_eq!(name_prefix_group("a-b"), "core");
+    }
+
+    // ── domain_keywords ────────────────────────────────────────────────
+
+    #[test]
+    fn domain_keywords_filters_short_words_and_stopwords() {
+        let kws: std::collections::HashSet<String> =
+            domain_keywords("the agent and a project for billing")
+                .into_iter()
+                .collect();
+        // "the", "and", "for", "project" → stopwords; "a", "agent" length boundary
+        assert!(kws.contains("agent"));
+        assert!(kws.contains("billing"));
+        assert!(!kws.contains("the"));
+        assert!(!kws.contains("and"));
+        assert!(!kws.contains("project")); // explicit stopword
+    }
+
+    // ── extract_md_description ─────────────────────────────────────────
+    // These tests write a temp file under target/ to keep them hermetic.
+
+    fn write_temp(name: &str, content: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join("mercator-tests");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(name);
+        std::fs::write(&path, content).unwrap();
+        path
+    }
+
+    #[test]
+    fn extract_md_description_skips_frontmatter_and_headings() {
+        let path = write_temp(
+            "fm-and-heading.md",
+            "---\ntitle: Foo\n---\n\n# Heading\n\nReal description here.\nSecond line continues.\n\nLater paragraph.\n",
+        );
+        let got = extract_md_description(&path).unwrap();
+        assert_eq!(got, "Real description here. Second line continues.");
+    }
+
+    #[test]
+    fn extract_md_description_uses_blockquote_tagline_as_description() {
+        // Common README shape — first prose line is a blockquote tagline.
+        // The extractor strips the `>` prefix and treats it as the description.
+        let path = write_temp(
+            "tagline.md",
+            "# Project\n\n> Cartography for your local landscape\n",
+        );
+        let got = extract_md_description(&path).unwrap();
+        assert_eq!(got, "Cartography for your local landscape");
+    }
+
+    #[test]
+    fn extract_md_description_skips_badges_and_picks_real_paragraph() {
+        let path = write_temp(
+            "badges.md",
+            "# Project\n\n![ci](https://x.com/y.svg)\n[![cov](https://x.com/c.svg)](https://x.com/c)\n\nThe actual description text.\n",
+        );
+        let got = extract_md_description(&path).unwrap();
+        assert_eq!(got, "The actual description text.");
+    }
+
+    #[test]
+    fn extract_md_description_caps_at_240_chars() {
+        let long = "word ".repeat(200);
+        let path = write_temp("long.md", &format!("# Title\n\n{}\n", long));
+        let got = extract_md_description(&path).unwrap();
+        assert!(got.chars().count() <= 241); // 240 + ellipsis
+        assert!(got.ends_with('…'));
+    }
+
+    #[test]
+    fn extract_md_description_returns_none_for_empty() {
+        let path = write_temp("empty.md", "# only heading\n\n---\n");
+        assert!(extract_md_description(&path).is_none());
+    }
+
+    // ── deduplicate_projects ───────────────────────────────────────────
+
+    fn project(name: &str, ptype: ProjectType, remote: Option<&str>) -> Project {
+        Project {
+            name: name.to_string(),
+            path: format!("/tmp/{}", name),
+            description: "No description provided.".to_string(),
+            project_type: ptype,
+            last_modified: None,
+            git_branch: None,
+            last_commit: None,
+            git_status: None,
+            tech_stack: vec![],
+            remote_url: remote.map(|s| s.to_string()),
+            agent_used: None,
+            obsidian_url: None,
+            obsidian_note_path: None,
+            tags: vec![],
+        }
+    }
+
+    #[test]
+    fn deduplicate_merges_local_with_matching_github() {
+        let local = project(
+            "mercator",
+            ProjectType::Git,
+            Some("git@github.com:zot24/mercator.git"),
+        );
+        let mut remote = project(
+            "mercator",
+            ProjectType::GitHub,
+            Some("https://github.com/zot24/mercator"),
+        );
+        remote.description = "Cartography for your local landscape".to_string();
+        remote.tech_stack = vec!["Rust".to_string()];
+
+        let merged = deduplicate_projects(vec![local, remote]);
+        assert_eq!(merged.len(), 1);
+        assert!(matches!(merged[0].project_type, ProjectType::Git));
+        assert_eq!(
+            merged[0].description,
+            "Cartography for your local landscape"
+        );
+        assert!(merged[0].tech_stack.contains(&"Rust".to_string()));
+    }
+
+    #[test]
+    fn deduplicate_keeps_remote_only_projects() {
+        let only_remote = project("foo", ProjectType::GitHub, Some("https://github.com/x/foo"));
+        let merged = deduplicate_projects(vec![only_remote]);
+        assert_eq!(merged.len(), 1);
+        assert!(matches!(merged[0].project_type, ProjectType::GitHub));
+    }
+
+    // ── auto_tag_projects ──────────────────────────────────────────────
+
+    #[test]
+    fn auto_tag_picks_up_keywords_from_description() {
+        let mut p = project("acme", ProjectType::Git, None);
+        p.description = "A small CLI tool for Docker workflow automation".to_string();
+        let mut v = vec![p];
+        auto_tag_projects(&mut v);
+        assert!(v[0].tags.contains(&"cli".to_string()));
+        assert!(v[0].tags.contains(&"devops".to_string()));
+        assert!(v[0].tags.contains(&"automation".to_string()));
+    }
+
+    #[test]
+    fn auto_tag_returns_empty_when_no_match() {
+        let mut p = project("xyzzy", ProjectType::Git, None);
+        p.description = "completely unrelated string".to_string();
+        let mut v = vec![p];
+        auto_tag_projects(&mut v);
+        assert!(v[0].tags.is_empty());
     }
 }
