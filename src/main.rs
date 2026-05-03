@@ -181,53 +181,114 @@ fn get_git_info(
     (branch, commit, git_status, remote_url)
 }
 
-/// Fetch repositories from GitHub API
-async fn fetch_github_repos(username: &str) -> Vec<Project> {
-    let mut projects = Vec::new();
+/// Format an HTTP error response into a single-line summary suitable for
+/// stderr. Pulls the JSON `message` field if present (GitHub / GitLab both
+/// use it for 4xx errors) and includes any rate-limit headers GitHub
+/// returns. Pure function so it can be unit-tested without HTTP.
+fn format_api_error(
+    provider: &str,
+    status: u16,
+    body: &str,
+    rate_remaining: Option<&str>,
+    rate_reset_epoch: Option<&str>,
+) -> String {
+    let parsed_message = serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| {
+            v.get("message")
+                .and_then(|m| m.as_str())
+                .map(str::to_string)
+        });
+    let message = parsed_message.unwrap_or_else(|| {
+        // Fallback: short truncated body
+        body.chars().take(200).collect::<String>()
+    });
+    let mut out = format!("{} API error {}: {}", provider, status, message);
+    if let (Some(rem), Some(reset)) = (rate_remaining, rate_reset_epoch) {
+        // GitHub-style rate limit hint
+        if let Ok(reset_n) = reset.parse::<i64>() {
+            let now = chrono::Utc::now().timestamp();
+            let secs = (reset_n - now).max(0);
+            out.push_str(&format!(
+                " (rate limit: {} remaining, resets in {}s)",
+                rem, secs
+            ));
+        }
+    }
+    if status == 401 || status == 403 {
+        out.push_str(" — set a token (issue #2) for authenticated quota");
+    }
+    out
+}
 
+/// Fetch repositories from GitHub API
+async fn fetch_github_repos(username: &str) -> Result<Vec<Project>, String> {
     let client = reqwest::Client::new();
     let url = format!(
         "https://api.github.com/users/{}/repos?per_page=100&sort=pushed",
         username
     );
 
-    match client
+    let response = client
         .get(&url)
         .header("User-Agent", "Mercator/1.0")
         .header("Accept", "application/vnd.github.v3+json")
         .send()
         .await
-    {
-        Ok(response) => {
-            if let Ok(repos) = response.json::<Vec<GitHubRepo>>().await {
-                for repo in repos.into_iter().take(50) {
-                    let tech_stack = detect_github_tech_stack(&repo);
+        .map_err(|e| format!("GitHub request failed: {}", e))?;
 
-                    projects.push(Project {
-                        name: repo.name.clone(),
-                        path: repo.html_url.clone(),
-                        description: repo.description.unwrap_or_default(),
-                        project_type: ProjectType::GitHub,
-                        last_modified: Some(repo.pushed_at),
-                        git_branch: Some(repo.default_branch.unwrap_or_else(|| "main".to_string())),
-                        last_commit: None,
-                        git_status: None,
-                        tech_stack,
-                        remote_url: Some(repo.html_url),
-                        agent_used: None,
-                        obsidian_url: None,
-                        obsidian_note_path: None,
-                        tags: vec![],
-                    });
-                }
-            }
-        }
-        Err(e) => {
-            eprintln!("Warning: Failed to fetch GitHub repos: {}", e);
-        }
+    if !response.status().is_success() {
+        let status = response.status().as_u16();
+        let rate_remaining = response
+            .headers()
+            .get("x-ratelimit-remaining")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string);
+        let rate_reset = response
+            .headers()
+            .get("x-ratelimit-reset")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string);
+        let body = response.text().await.unwrap_or_default();
+        return Err(format_api_error(
+            "GitHub",
+            status,
+            &body,
+            rate_remaining.as_deref(),
+            rate_reset.as_deref(),
+        ));
     }
 
-    projects
+    let repos: Vec<GitHubRepo> = response
+        .json()
+        .await
+        .map_err(|e| format!("GitHub response was not a repo array: {}", e))?;
+
+    let projects = repos
+        .into_iter()
+        .take(50)
+        .map(|repo| {
+            let tech_stack = detect_github_tech_stack(&repo);
+            Project {
+                name: repo.name,
+                path: repo.html_url.clone(),
+                description: repo.description.unwrap_or_default(),
+                project_type: ProjectType::GitHub,
+                last_modified: Some(repo.pushed_at),
+                git_branch: Some(repo.default_branch.unwrap_or_else(|| "main".to_string())),
+                last_commit: None,
+                git_status: None,
+                tech_stack,
+                remote_url: Some(repo.html_url),
+                agent_used: None,
+                obsidian_url: None,
+                obsidian_note_path: None,
+                tags: vec![],
+            }
+        })
+        .collect();
+
+    Ok(projects)
 }
 
 #[derive(Deserialize)]
@@ -261,51 +322,56 @@ fn detect_github_tech_stack(repo: &GitHubRepo) -> Vec<String> {
 }
 
 /// Fetch repositories from GitLab API
-async fn fetch_gitlab_repos(username: &str) -> Vec<Project> {
-    let mut projects = Vec::new();
-
+async fn fetch_gitlab_repos(username: &str) -> Result<Vec<Project>, String> {
     let client = reqwest::Client::new();
     let url = format!(
         "https://gitlab.com/api/v4/users/{}/projects?per_page=50&order_by=pushed_at",
         username
     );
 
-    match client
+    let response = client
         .get(&url)
         .header("User-Agent", "Mercator/1.0")
         .send()
         .await
-    {
-        Ok(response) => {
-            if let Ok(repos) = response.json::<Vec<GitLabRepo>>().await {
-                for repo in repos.into_iter().take(50) {
-                    let tech_stack = detect_gitlab_tech_stack(&repo);
+        .map_err(|e| format!("GitLab request failed: {}", e))?;
 
-                    projects.push(Project {
-                        name: repo.name.clone(),
-                        path: repo.web_url.clone(),
-                        description: repo.description.unwrap_or_default(),
-                        project_type: ProjectType::GitLab,
-                        last_modified: Some(repo.last_activity_at),
-                        git_branch: Some(repo.default_branch.unwrap_or_else(|| "main".to_string())),
-                        last_commit: None,
-                        git_status: None,
-                        tech_stack,
-                        remote_url: Some(repo.web_url),
-                        agent_used: None,
-                        obsidian_url: None,
-                        obsidian_note_path: None,
-                        tags: vec![],
-                    });
-                }
-            }
-        }
-        Err(e) => {
-            eprintln!("Warning: Failed to fetch GitLab repos: {}", e);
-        }
+    if !response.status().is_success() {
+        let status = response.status().as_u16();
+        let body = response.text().await.unwrap_or_default();
+        return Err(format_api_error("GitLab", status, &body, None, None));
     }
 
-    projects
+    let repos: Vec<GitLabRepo> = response
+        .json()
+        .await
+        .map_err(|e| format!("GitLab response was not a repo array: {}", e))?;
+
+    let projects = repos
+        .into_iter()
+        .take(50)
+        .map(|repo| {
+            let tech_stack = detect_gitlab_tech_stack(&repo);
+            Project {
+                name: repo.name,
+                path: repo.web_url.clone(),
+                description: repo.description.unwrap_or_default(),
+                project_type: ProjectType::GitLab,
+                last_modified: Some(repo.last_activity_at),
+                git_branch: Some(repo.default_branch.unwrap_or_else(|| "main".to_string())),
+                last_commit: None,
+                git_status: None,
+                tech_stack,
+                remote_url: Some(repo.web_url),
+                agent_used: None,
+                obsidian_url: None,
+                obsidian_note_path: None,
+                tags: vec![],
+            }
+        })
+        .collect();
+
+    Ok(projects)
 }
 
 #[derive(Deserialize)]
@@ -2418,14 +2484,28 @@ async fn main() {
 
                 if let Some(gh_user) = &github {
                     eprintln!("Fetching GitHub repos for {}...", gh_user);
-                    let gh_repos = fetch_github_repos(gh_user).await;
-                    all_projects.extend(gh_repos);
+                    match fetch_github_repos(gh_user).await {
+                        Ok(gh_repos) => {
+                            eprintln!("  fetched {} GitHub repos", gh_repos.len());
+                            all_projects.extend(gh_repos);
+                        }
+                        Err(e) => {
+                            eprintln!("  ⚠  {}", e);
+                        }
+                    }
                 }
 
                 if let Some(gl_user) = &gitlab {
                     eprintln!("Fetching GitLab repos for {}...", gl_user);
-                    let gl_repos = fetch_gitlab_repos(gl_user).await;
-                    all_projects.extend(gl_repos);
+                    match fetch_gitlab_repos(gl_user).await {
+                        Ok(gl_repos) => {
+                            eprintln!("  fetched {} GitLab repos", gl_repos.len());
+                            all_projects.extend(gl_repos);
+                        }
+                        Err(e) => {
+                            eprintln!("  ⚠  {}", e);
+                        }
+                    }
                 }
 
                 // Scan Obsidian vault
@@ -2937,5 +3017,48 @@ mod tests {
     fn is_authorised_accepts_correct_bearer_token() {
         let h = hdrs_with_auth("Bearer secret");
         assert!(is_authorised(Some("secret"), &h));
+    }
+
+    // ── format_api_error ───────────────────────────────────────────────
+
+    #[test]
+    fn format_api_error_extracts_message_from_json_body() {
+        let s = format_api_error(
+            "GitHub",
+            404,
+            r#"{"message":"Not Found","documentation_url":"https://docs..."}"#,
+            None,
+            None,
+        );
+        assert!(s.starts_with("GitHub API error 404: Not Found"));
+    }
+
+    #[test]
+    fn format_api_error_falls_back_to_truncated_body() {
+        let s = format_api_error("GitLab", 500, "Internal Server Error html...", None, None);
+        assert!(s.starts_with("GitLab API error 500: Internal Server Error html..."));
+    }
+
+    #[test]
+    fn format_api_error_hints_at_token_for_401_403() {
+        let s = format_api_error("GitHub", 403, r#"{"message":"rate limit"}"#, None, None);
+        assert!(s.contains("set a token"));
+
+        let s = format_api_error("GitHub", 200, "ok", None, None);
+        assert!(!s.contains("set a token"));
+    }
+
+    #[test]
+    fn format_api_error_includes_rate_limit_when_provided() {
+        let future_reset = (chrono::Utc::now().timestamp() + 60).to_string();
+        let s = format_api_error(
+            "GitHub",
+            403,
+            r#"{"message":"rate limit"}"#,
+            Some("0"),
+            Some(&future_reset),
+        );
+        assert!(s.contains("0 remaining"));
+        assert!(s.contains("resets in"));
     }
 }
