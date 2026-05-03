@@ -85,7 +85,7 @@ the day it makes your existing project sprawl manageable.
 - Local project scanning — Git repos, `IDEA.md` folders, top-level directories
 - Git metadata — branch, last commit, dirty/uncommitted-files detection (click the warning to see changed files)
 - Tech stack detection — Node.js, Rust, Python, Go, Docker, Ruby, Java, PHP, Elixir, …
-- GitHub / GitLab integration — public repos via API (currently capped at 50, unauthenticated)
+- GitHub / GitLab integration — paginated API (5000/hr authenticated, 60/hr otherwise); set `GITHUB_TOKEN` / `GITLAB_TOKEN` for private repos
 - Obsidian vault scan — pulls `Projects/` notes and the `@Projects.md` idea list, links them to matching repos by name
 - AI agent detection — identifies projects using Claude Code (`CLAUDE.md`, `.claude/`) or Codex (`AGENTS.md`, `.codex/`)
 - Deduplication — local Git repos merge with their GitHub/GitLab counterparts via remote URL or fallback name match
@@ -99,7 +99,7 @@ the day it makes your existing project sprawl manageable.
 **Visualisation**
 - Three views: list, blocks (tile grid), graph (D3 force-directed)
 - Graph edges from name-mention, shared keywords, shared tags, and idea-↔-implementation links
-- Sidebar filters: type, dirty, favorites, dynamic categories
+- Sidebar filters: type, dirty, stale (≥21 days idle), rotting (stale + dirty), favorites, dynamic categories
 - Real-time search, sort by name or last modified
 
 **In-app explorer**
@@ -232,7 +232,7 @@ The promises in *Why Mercator?* that don't ship today live as tracked issues. Th
 
 - **"Stops me from losing projects"** — local + GitHub + GitLab + Obsidian work; **Vercel / Supabase / Turso don't exist yet** ([#8](https://github.com/zot24/mercator/issues/8))
 - **"Cuts the context-switch tax"** — file-tree explorer ships; **"where I left off" auto-opens README, not the file you actually had open** ([#19](https://github.com/zot24/mercator/issues/19))
-- **"Catches silent decay"** — dirty repos surface today; **stale ("sitting for three weeks") doesn't** ([#7](https://github.com/zot24/mercator/issues/7)); deploy / quota decay is gated on [#8](https://github.com/zot24/mercator/issues/8)
+- **"Catches silent decay"** — dirty repos and stale (≥21 days idle) surface today, plus a `ROTTING` filter for the rare project that's both. Deploy / quota decay is gated on [#8](https://github.com/zot24/mercator/issues/8)
 - **"Tells me where to point AI"** — single-project agent launch works (with `--features swarm`); **cross-project landscape questioning** is [#20](https://github.com/zot24/mercator/issues/20)
 - **"Doesn't trap my data"** — **markdown export doesn't exist yet** ([#1](https://github.com/zot24/mercator/issues/1))
 
