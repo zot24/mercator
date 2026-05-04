@@ -577,11 +577,16 @@ pub fn load_all_projects(conn: &Connection) -> Result<Vec<Project>, String> {
 
 /// Full-text search across name + description + tags via FTS5. Results
 /// come back ordered by FTS5 rank (best match first), fully hydrated.
-/// `query` is passed through to `MATCH` — see SQLite's FTS5 docs for
-/// the supported syntax (prefix `foo*`, AND `foo bar`, OR `foo OR bar`,
-/// quoted phrases, column filters like `name:foo`).
-#[allow(dead_code)] // wired to the CLI in stage 4b
+///
+/// User input is tokenized on whitespace and each token is double-quoted
+/// before being passed to `MATCH`, so punctuation inside a word
+/// (hyphens, dots, slashes) doesn't confuse the FTS5 parser — bare
+/// `cli-tool` would otherwise parse as `cli NOT tool`. Multi-word
+/// queries become AND across tokens. Users who want raw FTS5 syntax
+/// (prefix `foo*`, `OR`, column filters) can wrap the whole query in
+/// quotes from the shell, e.g. `mercator search '"foo OR bar"'`.
 pub fn search_projects(conn: &Connection, query: &str) -> Result<Vec<Project>, String> {
+    let normalized = normalize_fts_query(query);
     let sql = format!(
         "SELECT {} FROM projects p
          JOIN projects_fts f ON p.id = f.rowid
@@ -593,17 +598,28 @@ pub fn search_projects(conn: &Connection, query: &str) -> Result<Vec<Project>, S
         .prepare(&sql)
         .map_err(|e| format!("prepare search: {}", e))?;
     let rows: Vec<(i64, Project)> = stmt
-        .query_map(params![query], project_from_row)
-        .map_err(|e| format!("query search ({:?}): {}", query, e))?
+        .query_map(params![normalized], project_from_row)
+        .map_err(|e| format!("query search ({:?}): {}", normalized, e))?
         .collect::<Result<_, _>>()
         .map_err(|e| format!("read search rows: {}", e))?;
     hydrate_relations(conn, rows)
 }
 
+/// Wrap each whitespace-separated token in double-quotes so FTS5 treats
+/// it as a literal phrase. Internal double-quotes are escaped per the
+/// FTS5 spec (`""`). Empty input yields empty output (the caller's
+/// MATCH will return zero rows).
+fn normalize_fts_query(query: &str) -> String {
+    query
+        .split_whitespace()
+        .map(|tok| format!("\"{}\"", tok.replace('"', "\"\"")))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// Filters for `list_projects`. Each `Some` narrows the result set;
 /// `None` leaves that dimension unfiltered. Combining filters is AND.
 #[derive(Debug, Default, Clone)]
-#[allow(dead_code)] // wired to the CLI in stage 4b
 pub struct ListFilter {
     pub project_type: Option<String>,
     pub tag: Option<String>,
@@ -612,7 +628,6 @@ pub struct ListFilter {
 
 /// Filtered project list (no FTS, just SQL filters). Used by
 /// `mercator list` which has predicate filters but no free-text needs.
-#[allow(dead_code)] // wired to the CLI in stage 4b
 pub fn list_projects(conn: &Connection, filter: &ListFilter) -> Result<Vec<Project>, String> {
     let mut clauses: Vec<String> = Vec::new();
     let mut binds: Vec<String> = Vec::new();
@@ -1023,6 +1038,45 @@ mod tests {
         // No match.
         let none = search_projects(&conn, "rocket").unwrap();
         assert!(none.is_empty());
+    }
+
+    #[test]
+    fn search_handles_hyphenated_names_and_multi_word_and() {
+        // Regression guard: bare `cli-tool` used to fail with "no such
+        // column: tool" because FTS5's parser reads `-` as NOT. The
+        // search helper now wraps each token in phrase quotes.
+        let dir = tempfile::tempdir().unwrap();
+        let mut conn = open(&dir.path().join("db.sqlite")).unwrap();
+        let mut a = sample_project("cli-tool", "/tmp/cli-tool", ProjectType::Git);
+        a.description = "rust cli for stuff".into();
+        let mut b = sample_project("web-app", "/tmp/web-app", ProjectType::Git);
+        b.description = "node web frontend".into();
+        upsert_projects(&mut conn, &[a, b]).unwrap();
+
+        // Hyphenated literal — punctuation no longer breaks the parse.
+        let cli = search_projects(&conn, "cli-tool").unwrap();
+        assert_eq!(cli.len(), 1);
+        assert_eq!(cli[0].name, "cli-tool");
+
+        // Multi-word AND — both tokens must appear somewhere across the
+        // indexed columns.
+        let rust_cli = search_projects(&conn, "rust cli").unwrap();
+        assert_eq!(rust_cli.len(), 1);
+        assert_eq!(rust_cli[0].name, "cli-tool");
+
+        // No match because "rust" doesn't appear in the web-app row.
+        let rust_web = search_projects(&conn, "rust web").unwrap();
+        assert!(rust_web.is_empty());
+    }
+
+    #[test]
+    fn normalize_fts_query_quotes_every_token() {
+        assert_eq!(normalize_fts_query("foo"), r#""foo""#);
+        assert_eq!(normalize_fts_query("foo bar"), r#""foo" "bar""#);
+        assert_eq!(normalize_fts_query("cli-tool"), r#""cli-tool""#);
+        // Internal double-quote is escaped per FTS5 ("").
+        assert_eq!(normalize_fts_query(r#"a"b"#), r#""a""b""#);
+        assert_eq!(normalize_fts_query("   "), "");
     }
 
     #[test]
