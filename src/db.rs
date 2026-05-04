@@ -98,9 +98,15 @@ pub struct ImportStats {
 
 /// Import an existing `mercator_map.json` (and optional
 /// `mercator_purged.json` sidecar) into the DB. Idempotent: re-running
-/// upserts each row by `path`. Useful both as the one-time migration
-/// the issue calls for, and as a "I edited the JSON, push it through"
-/// recovery path during the staged rollout.
+/// upserts each row by `path`. Used both as the one-time migration the
+/// issue calls for, and as the per-survey hydration path during the
+/// staged rollout.
+///
+/// The purged sidecar is imported **first** and projects whose path is
+/// on the blocklist (either the live DB row or the freshly-imported
+/// sidecar entries) are skipped — otherwise the stale `map.json`
+/// snapshot from before a dashboard purge would silently re-introduce
+/// purged projects on the next survey.
 pub fn import_from_json(
     conn: &mut Connection,
     map_json_path: &Path,
@@ -108,15 +114,7 @@ pub fn import_from_json(
 ) -> Result<ImportStats, String> {
     let mut stats = ImportStats::default();
 
-    // Projects
-    if map_json_path.exists() {
-        let projects = load_map(map_json_path).map_err(|e| format!("read map.json: {}", e))?;
-        let upsert_stats = upsert_projects(conn, &projects)?;
-        stats.projects_inserted = upsert_stats.projects_inserted;
-        stats.projects_updated = upsert_stats.projects_updated;
-    }
-
-    // Purged sidecar
+    // Purged sidecar first so the project loop below can skip purged paths.
     if let Some(purged_path) = purged_json_path {
         if purged_path.exists() {
             let raw = std::fs::read_to_string(purged_path)
@@ -136,6 +134,19 @@ pub fn import_from_json(
             tx.commit()
                 .map_err(|e| format!("commit purged tx: {}", e))?;
         }
+    }
+
+    // Projects, with blocklist filter.
+    if map_json_path.exists() {
+        let projects = load_map(map_json_path).map_err(|e| format!("read map.json: {}", e))?;
+        let purged_paths: HashSet<String> = list_purged(conn)?.into_iter().collect();
+        let kept: Vec<Project> = projects
+            .into_iter()
+            .filter(|p| !purged_paths.contains(p.path.trim_end_matches('/')))
+            .collect();
+        let upsert_stats = upsert_projects(conn, &kept)?;
+        stats.projects_inserted = upsert_stats.projects_inserted;
+        stats.projects_updated = upsert_stats.projects_updated;
     }
 
     Ok(stats)
@@ -657,6 +668,37 @@ mod tests {
             secs_section.contains('.'),
             "expected decimal in seconds, got {secs_section:?} (full: {last_seen:?})"
         );
+    }
+
+    #[test]
+    fn import_skips_paths_on_the_purge_blocklist() {
+        // Regression guard for a stage-3b bug: a stale `map.json` (written
+        // before a dashboard-side purge) used to silently re-introduce
+        // the purged project on the next survey because `import_from_json`
+        // upserted projects without consulting the blocklist. The fix
+        // imports the sidecar first and skips already-purged paths.
+        let dir = tempfile::tempdir().unwrap();
+        let map_path = dir.path().join("map.json");
+        let purged_path = dir.path().join("mercator_purged.json");
+        save_map(
+            &[
+                sample_project("alpha", "/tmp/alpha", ProjectType::Git),
+                sample_project("beta", "/tmp/beta", ProjectType::Git),
+            ],
+            &map_path,
+        )
+        .unwrap();
+        std::fs::write(&purged_path, r#"["/tmp/alpha"]"#).unwrap();
+
+        let mut conn = open(&dir.path().join("db.sqlite")).unwrap();
+        let stats = import_from_json(&mut conn, &map_path, Some(&purged_path)).unwrap();
+        assert_eq!(stats.projects_inserted, 1, "alpha should be skipped");
+        assert_eq!(count_projects(&conn).unwrap(), 1);
+        assert_eq!(count_purged(&conn).unwrap(), 1);
+
+        let projects = load_all_projects(&conn).unwrap();
+        assert_eq!(projects.len(), 1);
+        assert_eq!(projects[0].name, "beta");
     }
 
     #[test]
