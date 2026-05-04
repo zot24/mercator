@@ -34,9 +34,7 @@ use serde::{Deserialize, Serialize};
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-#[cfg(feature = "swarm")]
 use std::sync::Arc;
-#[cfg(feature = "swarm")]
 use tokio::sync::Mutex;
 use tower_http::services::ServeDir;
 
@@ -297,6 +295,11 @@ struct AppState {
     #[cfg(feature = "swarm")]
     task_handles: Arc<Mutex<std::collections::HashMap<String, tokio::task::JoinHandle<()>>>>,
     map_file: PathBuf,
+    /// Live SQLite handle. Stage 2a of #24 routes `/api/map` and
+    /// `/api/graph` through here, with a JSON fallback if the DB read
+    /// fails. Wrapped in a tokio Mutex because `rusqlite::Connection` is
+    /// `!Sync`; lock holds are short (a single SELECT).
+    db: Arc<Mutex<rusqlite::Connection>>,
     /// Paths the dashboard's refresh button re-scans. Empty = refresh is a
     /// no-op (button just reloads the page). Configured via `serve --refresh`.
     refresh_paths: Vec<PathBuf>,
@@ -460,6 +463,42 @@ fn write_purged(map_file: &Path, set: &std::collections::HashSet<String>) -> Res
     list.sort();
     let json = serde_json::to_string_pretty(&list).map_err(|e| e.to_string())?;
     std::fs::write(&path, &json).map_err(|e| format!("Failed to write {}: {}", path.display(), e))
+}
+
+/// `GET /api/map` — return the full project list.
+///
+/// Stage 2a of #24: read from SQLite, fall back to JSON only if the DB
+/// read fails. The fallback exists because `mercator survey` writes JSON
+/// first today; the DB catches up via the import call inside the same
+/// survey run, but a bug in that path shouldn't blank the dashboard.
+async fn serve_map_api(State(state): State<AppState>) -> Json<Vec<Project>> {
+    let conn = state.db.lock().await;
+    match db::load_all_projects(&conn) {
+        Ok(projects) => Json(projects),
+        Err(db_err) => {
+            eprintln!("Warning: db read failed ({}); falling back to JSON", db_err);
+            match load_map(&state.map_file) {
+                Ok(projects) => Json(projects),
+                Err(json_err) => {
+                    eprintln!("Warning: {}", json_err);
+                    Json(vec![])
+                }
+            }
+        }
+    }
+}
+
+/// `GET /api/graph` — return the tag co-occurrence graph derived from
+/// the current project list. Same DB-then-JSON fallback as `/api/map`.
+async fn serve_graph_api(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let conn = state.db.lock().await;
+    match db::load_all_projects(&conn) {
+        Ok(projects) => Json(compute_graph(&projects)),
+        Err(_) => match load_map(&state.map_file) {
+            Ok(projects) => Json(compute_graph(&projects)),
+            Err(_) => Json(serde_json::json!({ "nodes": [], "edges": [] })),
+        },
+    }
 }
 
 #[derive(Deserialize)]
@@ -786,54 +825,27 @@ async fn main() {
             db: db_path,
             refresh,
         } => {
-            // Stage 1 of #24: open the DB and mirror the current JSON map
-            // into it on startup, so the user can validate the SQLite
-            // migration alongside the still-authoritative JSON path.
-            // Failures here are logged but don't block server startup —
-            // the dashboard works without the DB until stage 2 cuts over.
-            match db::open(&db_path) {
-                Ok(mut conn) => {
-                    let purged = db::purged_sidecar_for_map(&map_file);
-                    match db::import_from_json(&mut conn, &map_file, Some(&purged)) {
-                        Ok(stats) => eprintln!(
-                            "DB ready: {} projects, {} purged paths in {} ({} new, {} updated this run)",
-                            db::count_projects(&conn).unwrap_or(0),
-                            db::count_purged(&conn).unwrap_or(0),
-                            db_path.display(),
-                            stats.projects_inserted,
-                            stats.projects_updated,
-                        ),
-                        Err(e) => eprintln!("Warning: db import failed: {}", e),
-                    }
-                }
-                Err(e) => eprintln!("Warning: could not open db {}: {}", db_path.display(), e),
+            // Open the DB (creating + applying schema if absent) and import
+            // the existing JSON map + purge sidecar so a fresh DB on a
+            // long-running install is hydrated immediately. If the DB
+            // refuses to open we fall through to a panicking `.expect` —
+            // the alternative would be running with no DB and an empty
+            // dashboard, which is worse than a clear startup failure.
+            let mut conn =
+                db::open(&db_path).expect("open db (use --db to point at a writable file)");
+            let purged_sidecar = db::purged_sidecar_for_map(&map_file);
+            match db::import_from_json(&mut conn, &map_file, Some(&purged_sidecar)) {
+                Ok(stats) => eprintln!(
+                    "DB ready: {} projects, {} purged paths in {} ({} new, {} updated this run)",
+                    db::count_projects(&conn).unwrap_or(0),
+                    db::count_purged(&conn).unwrap_or(0),
+                    db_path.display(),
+                    stats.projects_inserted,
+                    stats.projects_updated,
+                ),
+                Err(e) => eprintln!("Warning: db import failed: {}", e),
             }
-
-            // Read the map file on each request so browser refresh picks up changes
-            let map_path = map_file.clone();
-            let serve_map = move || {
-                let path = map_path.clone();
-                async move {
-                    match load_map(&path) {
-                        Ok(projects) => Json(projects),
-                        Err(e) => {
-                            eprintln!("Warning: {}", e);
-                            Json(vec![])
-                        }
-                    }
-                }
-            };
-
-            let graph_path = map_file.clone();
-            let serve_graph = move || {
-                let path = graph_path.clone();
-                async move {
-                    match load_map(&path) {
-                        Ok(projects) => Json(compute_graph(&projects)),
-                        Err(_) => Json(serde_json::json!({ "nodes": [], "edges": [] })),
-                    }
-                }
-            };
+            let db_handle = Arc::new(Mutex::new(conn));
 
             let app_state = AppState {
                 #[cfg(feature = "swarm")]
@@ -841,6 +853,7 @@ async fn main() {
                 #[cfg(feature = "swarm")]
                 task_handles: Arc::new(Mutex::new(std::collections::HashMap::new())),
                 map_file: map_file.clone(),
+                db: db_handle,
                 refresh_paths: refresh,
             };
 
@@ -849,8 +862,8 @@ async fn main() {
             // since the dashboard HTML itself is public; the API is the
             // sensitive surface.
             let api = Router::new()
-                .route("/api/map", get(serve_map))
-                .route("/api/graph", get(serve_graph))
+                .route("/api/map", get(serve_map_api))
+                .route("/api/graph", get(serve_graph_api))
                 .route("/api/open-terminal", post(open_terminal))
                 .route("/api/git-status", get(get_git_status_api))
                 .route("/api/categorize", post(recategorize_api))

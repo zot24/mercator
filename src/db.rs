@@ -70,12 +70,20 @@ PRAGMA user_version = 1;
 "#;
 
 /// Open or create a SQLite database at `path` and apply schema v1.
-/// Foreign keys are enabled so `ON DELETE CASCADE` on the M2M tables
-/// actually fires.
+///
+/// PRAGMAs:
+/// - `journal_mode = WAL` — readers don't block writers (and vice versa),
+///   which matters once stage 2+ has the dashboard reading concurrently
+///   with survey runs.
+/// - `foreign_keys = ON` — `ON DELETE CASCADE` on the M2M tables actually
+///   fires; SQLite's default is OFF for backwards compat reasons.
 pub fn open(path: &Path) -> Result<Connection, String> {
     let conn = Connection::open(path).map_err(|e| format!("open db {}: {}", path.display(), e))?;
-    conn.execute_batch("PRAGMA foreign_keys = ON;")
-        .map_err(|e| format!("enable foreign keys: {}", e))?;
+    // `journal_mode = WAL` is a query-style PRAGMA — `execute_batch` accepts
+    // it but the result is discarded; that's fine, we just need the side
+    // effect.
+    conn.execute_batch("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;")
+        .map_err(|e| format!("set pragmas: {}", e))?;
     conn.execute_batch(SCHEMA_V1)
         .map_err(|e| format!("apply schema: {}", e))?;
     Ok(conn)
