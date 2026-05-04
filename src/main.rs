@@ -117,9 +117,12 @@ enum Commands {
         #[arg(default_value = "mercator-export")]
         out_dir: PathBuf,
 
-        /// Source map JSON to read from
-        #[arg(short, long, default_value = "mercator_map.json")]
-        map_file: PathBuf,
+        /// SQLite database file to read from. Stage 3b of #24: export
+        /// reads the live DB instead of the legacy `mercator_map.json`
+        /// snapshot, so dashboard-side purges since the last `mercator
+        /// survey` are honored.
+        #[arg(short = 'd', long, default_value = "mercator.db")]
+        db: PathBuf,
 
         /// When set, write under `<vault>/<folder>/` instead of `out_dir`.
         /// Feed the Obsidian LLM-wiki layer (issue #22).
@@ -674,6 +677,27 @@ async fn main() {
             if paths.is_empty() {
                 paths.push(PathBuf::from("."));
             }
+
+            // Open the DB once for the whole survey loop. The DB is the
+            // source of truth for the purge blocklist (#24 stage 3b);
+            // each iteration reads the blocklist + writes the resulting
+            // project set back via `upsert_projects`.
+            let mut conn = match db::open(&db_path) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("Error: open db {}: {}", db_path.display(), e);
+                    std::process::exit(1);
+                }
+            };
+            // One-shot import of any pre-existing JSON files. After this
+            // first call the DB is the source of truth; the import is a
+            // no-op if the JSON files don't exist or have already been
+            // ingested by an earlier stage-1+ binary.
+            let purged_sidecar = db::purged_sidecar_for_map(&output);
+            if let Err(e) = db::import_from_json(&mut conn, &output, Some(&purged_sidecar)) {
+                eprintln!("  ⚠  initial JSON import failed: {}", e);
+            }
+
             loop {
                 let mut all_projects: Vec<Project> = Vec::new();
                 let mut local_count = 0;
@@ -747,8 +771,17 @@ async fn main() {
                     all_projects.extend(obs_projects);
                 }
 
-                // Filter out purged paths so they stay gone across re-surveys
-                let purged = read_purged(&output);
+                // Filter out purged paths so they stay gone across re-surveys.
+                // DB is the source of truth for the blocklist; on a fresh
+                // install the import above hydrated it from the legacy
+                // sidecar so the result is the same.
+                let purged: std::collections::HashSet<String> = db::list_purged(&conn)
+                    .unwrap_or_else(|e| {
+                        eprintln!("  ⚠  db blocklist read failed ({}); skipping filter", e);
+                        Vec::new()
+                    })
+                    .into_iter()
+                    .collect();
                 let before_purge = all_projects.len();
                 all_projects.retain(|p| !purged.contains(p.path.trim_end_matches('/')));
                 let purged_count = before_purge - all_projects.len();
@@ -783,25 +816,17 @@ async fn main() {
                     );
                 }
 
-                // Stage 1 of #24: keep the JSON map authoritative and
-                // mirror it into a SQLite DB so the user can verify the
-                // migration. Errors here log a warning but don't abort
-                // the survey.
-                match db::open(&db_path) {
-                    Ok(mut conn) => {
-                        let purged = db::purged_sidecar_for_map(&output);
-                        match db::import_from_json(&mut conn, &output, Some(&purged)) {
-                            Ok(stats) => eprintln!(
-                                "  db: {} new, {} updated, {} purged paths -> {}",
-                                stats.projects_inserted,
-                                stats.projects_updated,
-                                stats.purged_inserted,
-                                db_path.display()
-                            ),
-                            Err(e) => eprintln!("  ⚠  db import failed: {}", e),
-                        }
-                    }
-                    Err(e) => eprintln!("  ⚠  could not open db {}: {}", db_path.display(), e),
+                // Push this iteration's project set into the DB. The DB
+                // is the source of truth (#24 stage 2c+); the JSON file
+                // written above is a backup snapshot.
+                match db::upsert_projects(&mut conn, &all_projects) {
+                    Ok(stats) => eprintln!(
+                        "  db: {} new, {} updated -> {}",
+                        stats.projects_inserted,
+                        stats.projects_updated,
+                        db_path.display()
+                    ),
+                    Err(e) => eprintln!("  ⚠  db upsert failed: {}", e),
                 }
 
                 match watch {
@@ -815,11 +840,18 @@ async fn main() {
         }
         Commands::Export {
             out_dir,
-            map_file,
+            db: db_path,
             obsidian_vault,
             obsidian_folder,
         } => {
-            let projects = match load_map(&map_file) {
+            let conn = match db::open(&db_path) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("Error: open db {}: {}", db_path.display(), e);
+                    std::process::exit(1);
+                }
+            };
+            let projects = match db::load_all_projects(&conn) {
                 Ok(p) => p,
                 Err(e) => {
                     eprintln!("Error: {}", e);
