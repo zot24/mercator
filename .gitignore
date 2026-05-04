@@ -1,4 +1,8 @@
 /target
 mercator_map.json
+mercator_purged.json
+mercator.db
+mercator.db-shm
+mercator.db-wal
 .swarm/
 .claude/
