@@ -100,9 +100,12 @@ In rough priority order; the project board is authoritative, this is the human-r
 
 ### Next, smaller
 
-1. **Concurrent fetch in survey.** [ADR 0003](decisions/0003-source-trait-enum-dispatch.md) deferred `futures::join_all`. Easy now that the `Source` trait is in place.
-2. **Honest README sweep.** README's "Why Mercator?" mentions deploy decay and cross-project AI as if they ship; they don't. Already partially flagged in the Roadmap section — could be tighter.
-3. **Settings panel tokens** ([#2](https://github.com/zot24/mercator/issues/2)) — UI collects them, backend never reads. Connect it.
+1. **Honest README sweep.** README's "Why Mercator?" mentions deploy decay and cross-project AI as if they ship; they don't. Already partially flagged in the Roadmap section — could be tighter.
+2. **Settings panel tokens** ([#2](https://github.com/zot24/mercator/issues/2)) — UI collects them, backend never reads. Connect it.
+
+### Recently shipped
+
+- ✅ **Concurrent fetch in survey** — `futures::future::join_all` over the `Source` trait. Logs stay deterministic (intent lines before the await, result lines after). See [ADR 0003](decisions/0003-source-trait-enum-dispatch.md) "Update (2026-05-04)".
 
 ### Phase 2 — Make it smart
 

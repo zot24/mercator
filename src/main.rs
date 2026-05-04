@@ -812,15 +812,28 @@ async fn main() {
                     }));
                 }
 
-                for source in &remote_sources {
-                    eprintln!("Fetching {}...", source.description());
-                    match source.fetch().await {
-                        Ok(repos) => {
-                            eprintln!("  fetched {} {} repos", repos.len(), source.name());
-                            all_projects.extend(repos);
-                        }
-                        Err(e) => {
-                            eprintln!("  ⚠  {}", e);
+                // Fetch remote sources concurrently — `join_all` polls all
+                // futures together, so the wall-clock time is roughly the
+                // slowest source instead of the sum of all of them. Logs
+                // are emitted in source order after the await so the
+                // output stays deterministic and readable; concurrency
+                // would otherwise interleave eprintln from multiple
+                // sources and make the line noise unparseable.
+                if !remote_sources.is_empty() {
+                    for source in &remote_sources {
+                        eprintln!("Fetching {}...", source.description());
+                    }
+                    let results =
+                        futures::future::join_all(remote_sources.iter().map(|s| s.fetch())).await;
+                    for (source, result) in remote_sources.iter().zip(results) {
+                        match result {
+                            Ok(repos) => {
+                                eprintln!("  fetched {} {} repos", repos.len(), source.name());
+                                all_projects.extend(repos);
+                            }
+                            Err(e) => {
+                                eprintln!("  ⚠  {} ({})", e, source.name());
+                            }
                         }
                     }
                 }
