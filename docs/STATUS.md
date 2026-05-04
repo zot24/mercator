@@ -100,11 +100,12 @@ In rough priority order; the project board is authoritative, this is the human-r
 
 ### Next, smaller
 
-1. **Honest README sweep.** README's "Why Mercator?" mentions deploy decay and cross-project AI as if they ship; they don't. Already partially flagged in the Roadmap section — could be tighter.
-2. **Settings panel tokens** ([#2](https://github.com/zot24/mercator/issues/2)) — UI collects them, backend never reads. Connect it.
+1. **Settings panel UI cutover** ([#2](https://github.com/zot24/mercator/issues/2) — partially closed). Server-side config + refresh-uses-config shipped today; the dashboard's settings panel still writes tokens to localStorage instead of `POST /api/settings`. UI work, ~1 hour.
+2. **Honest README sweep.** README's "Why Mercator?" mentions deploy decay and cross-project AI as if they ship; they don't. Already partially flagged in the Roadmap section — could be tighter.
 
 ### Recently shipped
 
+- ✅ **Server-side config for tokens** — `~/.config/mercator/config.toml` (mode 0600), `GET /api/settings` returns the redacted shape, refresh button now fetches GitHub/GitLab when the config has a user. Closes the dead-server-state half of #2; UI cutover is the follow-up.
 - ✅ **Concurrent fetch in survey** — `futures::future::join_all` over the `Source` trait. Logs stay deterministic (intent lines before the await, result lines after). See [ADR 0003](decisions/0003-source-trait-enum-dispatch.md) "Update (2026-05-04)".
 
 ### Phase 2 — Make it smart

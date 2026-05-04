@@ -235,6 +235,22 @@ Each note has YAML frontmatter (`name`, `type`, `path`, `branch`, `status`, `las
 
 Start the web dashboard. All `/api/*` endpoints read and write the SQLite DB; the JSON file is consulted only as a fallback if a DB read errors.
 
+#### Optional: token config
+
+The dashboard's refresh button can fetch GitHub/GitLab if you drop a config file at `~/.config/mercator/config.toml`:
+
+```toml
+[github]
+user = "zot24"
+token = "ghp_xxxxx"   # optional — public repos work without it (60/hr cap)
+
+[gitlab]
+user = "zot24"
+token = "glpat-xxxxx" # optional
+```
+
+The file is read once at `mercator serve` startup and stored in memory; chmod 0600 is applied automatically when the binary writes it (the read path doesn't enforce the mode but it's recommended). Tokens never leave the server — `GET /api/settings` returns a redacted shape (`{github_user, github_token_set, gitlab_user, gitlab_token_set}`) for the dashboard's "you have a token configured" hint.
+
 ```bash
 mercator serve                          # http://127.0.0.1:3000
 mercator serve -p 8080                  # Custom port

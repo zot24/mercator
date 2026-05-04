@@ -29,6 +29,7 @@
 
 #[cfg(feature = "swarm")]
 mod agent;
+mod config;
 mod db;
 mod markdown;
 mod project;
@@ -369,6 +370,12 @@ struct AppState {
     /// Paths the dashboard's refresh button re-scans. Empty = refresh is a
     /// no-op (button just reloads the page). Configured via `serve --refresh`.
     refresh_paths: Vec<PathBuf>,
+    /// User-level config — GitHub/GitLab user names + tokens. Loaded
+    /// from `~/.config/mercator/config.toml` once at startup. The
+    /// dashboard's refresh handler consults it to decide whether to
+    /// fetch remote sources (#2). Behind a Mutex so a future
+    /// `POST /api/settings` can mutate it in place without restart.
+    cfg: Arc<Mutex<config::Config>>,
 }
 
 // ── Project Preview (file tree + viewer) ───────────────────────────────
@@ -638,11 +645,11 @@ async fn restore_project_api(
     }))
 }
 
-/// API endpoint: re-run auto-categorization against the existing map and save it
-/// Re-survey the configured local paths and rewrite the map. Remote sources
-/// (GitHub/GitLab/Obsidian) are intentionally NOT re-fetched here — the
-/// survey button is for "I just changed my filesystem". Use the `mercator
-/// survey` CLI for full coverage.
+/// API endpoint: re-survey the configured local paths and re-fetch any
+/// remote sources the user has set up in `~/.config/mercator/config.toml`.
+/// Behavior matches `mercator survey` for the configured providers, so
+/// the dashboard's refresh button is now strictly more capable than
+/// before — it picks up remote changes without dropping to the CLI.
 async fn refresh_survey_api(State(state): State<AppState>) -> Json<serde_json::Value> {
     if state.refresh_paths.is_empty() {
         return Json(serde_json::json!({
@@ -660,6 +667,50 @@ async fn refresh_survey_api(State(state): State<AppState>) -> Json<serde_json::V
         }));
         all.extend(found);
     }
+
+    // Build remote-source list from the loaded config — same shape as
+    // the `mercator survey` CLI, just sourced from the config file
+    // instead of CLI flags. Token + user are owned (cloned) so the
+    // futures don't borrow the lock.
+    let remote_sources: Vec<sources::AnySource> = {
+        let cfg = state.cfg.lock().await;
+        let mut v = Vec::new();
+        if let Some(user) = cfg.github.user() {
+            v.push(sources::AnySource::GitHub(sources::GitHubSource {
+                username: user.to_string(),
+                token: cfg.github.token().map(str::to_string),
+                max_repos: None,
+            }));
+        }
+        if let Some(user) = cfg.gitlab.user() {
+            v.push(sources::AnySource::GitLab(sources::GitLabSource {
+                username: user.to_string(),
+                token: cfg.gitlab.token().map(str::to_string),
+                max_repos: None,
+            }));
+        }
+        v
+    };
+    let mut remote_per_source = Vec::new();
+    if !remote_sources.is_empty() {
+        let results = futures::future::join_all(remote_sources.iter().map(|s| s.fetch())).await;
+        for (source, result) in remote_sources.iter().zip(results) {
+            let (count, error) = match result {
+                Ok(repos) => {
+                    let n = repos.len();
+                    all.extend(repos);
+                    (n, None)
+                }
+                Err(e) => (0, Some(e.to_string())),
+            };
+            remote_per_source.push(serde_json::json!({
+                "source": source.name(),
+                "fetched": count,
+                "error": error,
+            }));
+        }
+    }
+
     // Honour the existing purge blocklist (DB is the source of truth;
     // fall back to the JSON sidecar so a transient DB hiccup doesn't
     // re-introduce a project the user explicitly purged).
@@ -684,7 +735,17 @@ async fn refresh_survey_api(State(state): State<AppState>) -> Json<serde_json::V
         "ok": true,
         "total": all.len(),
         "per_path": per_path,
+        "per_source": remote_per_source,
     }))
+}
+
+/// `GET /api/settings` — return the current config minus secrets.
+/// User names + a `*_token_set` boolean are exposed; raw tokens are
+/// not. The dashboard uses this to render a "you have a token
+/// configured" hint without ever holding the secret in browser state.
+async fn settings_api(State(state): State<AppState>) -> Json<config::RedactedConfig> {
+    let cfg = state.cfg.lock().await;
+    Json(cfg.redacted())
 }
 
 async fn recategorize_api(State(state): State<AppState>) -> Json<serde_json::Value> {
@@ -1059,6 +1120,27 @@ async fn main() {
             }
             let db_handle = Arc::new(Mutex::new(conn));
 
+            // Load the user-level config (~/.config/mercator/config.toml)
+            // for GitHub/GitLab tokens. A missing file is fine — the
+            // refresh handler just won't fetch remote sources.
+            let cfg = match config::load() {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("Warning: config load failed ({}); continuing without it", e);
+                    config::Config::default()
+                }
+            };
+            let r = cfg.redacted();
+            if r.github_user.is_some() || r.gitlab_user.is_some() {
+                eprintln!(
+                    "Config: github={} (token: {}), gitlab={} (token: {})",
+                    r.github_user.as_deref().unwrap_or("-"),
+                    if r.github_token_set { "yes" } else { "no" },
+                    r.gitlab_user.as_deref().unwrap_or("-"),
+                    if r.gitlab_token_set { "yes" } else { "no" },
+                );
+            }
+
             let app_state = AppState {
                 #[cfg(feature = "swarm")]
                 jobs: Arc::new(Mutex::new(Vec::new())),
@@ -1067,6 +1149,7 @@ async fn main() {
                 map_file: map_file.clone(),
                 db: db_handle,
                 refresh_paths: refresh,
+                cfg: Arc::new(Mutex::new(cfg)),
             };
 
             // /api/* routes are protected by an optional Bearer token
@@ -1081,6 +1164,7 @@ async fn main() {
                 .route("/api/categorize", post(recategorize_api))
                 .route("/api/survey/refresh", post(refresh_survey_api))
                 .route("/api/skills", get(skills_api))
+                .route("/api/settings", get(settings_api))
                 .route("/api/project/purge", post(purge_project_api))
                 .route("/api/project/restore", post(restore_project_api))
                 .route("/api/purged", get(purged_list_api))
