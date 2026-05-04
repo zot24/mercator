@@ -104,7 +104,9 @@ the day it makes your existing project sprawl manageable.
 
 **In-app explorer**
 - Click any local project for a 3-pane preview: project list, file tree, viewer
-- Auto-opens `README.md` (or `IDEA.md` / `readme.txt`) with rendered markdown
+- Smart auto-open — dirty repos open the most-recently-modified uncommitted file; clean repos open the freshest file under `src/`/`app/`/`lib/`; README is the fallback
+- Header banner with branch, last commit, days-since-modified, dirty/stale badges
+- Markdown rendering for `.md` / `.mdx`; everything else as monospaced text
 - Arrow keys + filter input swap projects without leaving the modal
 - IDE / Claude Code / Codex launch buttons per project
 
@@ -231,7 +233,7 @@ When `MERCATOR_TOKEN` is set, every `/api/*` request must include `Authorization
 The promises in *Why Mercator?* that don't ship today live as tracked issues. The honest delta:
 
 - **"Stops me from losing projects"** — local + GitHub + GitLab + Obsidian work; **Vercel / Supabase / Turso don't exist yet** ([#8](https://github.com/zot24/mercator/issues/8))
-- **"Cuts the context-switch tax"** — file-tree explorer ships; **"where I left off" auto-opens README, not the file you actually had open** ([#19](https://github.com/zot24/mercator/issues/19))
+- **"Cuts the context-switch tax"** — file-tree explorer ships with smart auto-open: dirty repos open the most-recently-modified uncommitted file; clean repos open the freshest file under `src/`/`app/`/`lib/`; README is the fallback. Header banner shows branch, last commit, and days-since-modified.
 - **"Catches silent decay"** — dirty repos and stale (≥21 days idle) surface today, plus a `ROTTING` filter for the rare project that's both. Deploy / quota decay is gated on [#8](https://github.com/zot24/mercator/issues/8)
 - **"Tells me where to point AI"** — single-project agent launch works (with `--features swarm`); **cross-project landscape questioning** is [#20](https://github.com/zot24/mercator/issues/20)
 - **"Doesn't trap my data"** — **markdown export doesn't exist yet** ([#1](https://github.com/zot24/mercator/issues/1))

@@ -1146,6 +1146,21 @@ struct GitStatusQuery {
     path: String,
 }
 
+/// Parse a `git status --short` line and return the relative path. Skips
+/// the two-character status prefix and any leading whitespace, and unwraps
+/// rename arrows like `R  old -> new`. Pure function, unit-tested.
+fn parse_git_status_path(line: &str) -> Option<&str> {
+    let trimmed = line.get(3..)?.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Some((_, after)) = trimmed.split_once(" -> ") {
+        Some(after)
+    } else {
+        Some(trimmed)
+    }
+}
+
 async fn get_git_status_api(
     axum::extract::Query(q): axum::extract::Query<GitStatusQuery>,
 ) -> Json<serde_json::Value> {
@@ -1157,7 +1172,22 @@ async fn get_git_status_api(
     match output {
         Ok(o) if o.status.success() => {
             let stdout = String::from_utf8_lossy(&o.stdout);
-            let files: Vec<&str> = stdout.lines().collect();
+            let files: Vec<serde_json::Value> = stdout
+                .lines()
+                .map(|line| {
+                    let rel = parse_git_status_path(line);
+                    let mtime = rel
+                        .map(|r| Path::new(&q.path).join(r))
+                        .and_then(|p| std::fs::metadata(&p).ok())
+                        .and_then(|m| m.modified().ok())
+                        .map(format_time);
+                    serde_json::json!({
+                        "raw": line,
+                        "path": rel,
+                        "mtime": mtime,
+                    })
+                })
+                .collect();
             Json(serde_json::json!({ "files": files }))
         }
         Ok(o) => {
@@ -1632,6 +1662,9 @@ struct FileNode {
     name: String,
     path: String,
     is_dir: bool,
+    /// ISO 8601 modified timestamp; None if metadata couldn't be read
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mtime: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     children: Option<Vec<FileNode>>,
 }
@@ -1658,6 +1691,11 @@ fn walk_tree(p: &Path, depth: usize) -> Vec<FileNode> {
         }
         let path = e.path();
         let is_dir = path.is_dir();
+        let mtime = e
+            .metadata()
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .map(format_time);
         let children = if is_dir {
             Some(walk_tree(&path, depth + 1))
         } else {
@@ -1667,6 +1705,7 @@ fn walk_tree(p: &Path, depth: usize) -> Vec<FileNode> {
             name,
             path: path.to_string_lossy().into_owned(),
             is_dir,
+            mtime,
             children,
         });
     }
@@ -3200,5 +3239,33 @@ mod tests {
             parse_link_next(h).as_deref(),
             Some("https://api.github.com/user/repos?page=4")
         );
+    }
+
+    // ── parse_git_status_path ──────────────────────────────────────────
+
+    #[test]
+    fn parse_git_status_path_handles_modified() {
+        assert_eq!(parse_git_status_path(" M src/main.rs"), Some("src/main.rs"));
+        assert_eq!(parse_git_status_path("M  Cargo.toml"), Some("Cargo.toml"));
+    }
+
+    #[test]
+    fn parse_git_status_path_handles_added_and_untracked() {
+        assert_eq!(parse_git_status_path("A  new.txt"), Some("new.txt"));
+        assert_eq!(
+            parse_git_status_path("?? untracked.md"),
+            Some("untracked.md")
+        );
+    }
+
+    #[test]
+    fn parse_git_status_path_unwraps_rename() {
+        assert_eq!(parse_git_status_path("R  old.rs -> new.rs"), Some("new.rs"));
+    }
+
+    #[test]
+    fn parse_git_status_path_returns_none_for_empty() {
+        assert_eq!(parse_git_status_path(""), None);
+        assert_eq!(parse_git_status_path("  "), None);
     }
 }

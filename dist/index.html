@@ -419,6 +419,7 @@
                 <span class="material-symbols-outlined text-on-surface-variant text-[16px]">folder_open</span>
                 <h2 id="preview-title" class="mono text-[12px] font-bold text-primary"></h2>
                 <span id="preview-path" class="mono text-[9px] text-on-surface-variant truncate"></span>
+                <span id="preview-banner" class="mono text-[10px] flex-shrink-0 ml-2"></span>
             </div>
             <div class="flex items-center gap-2 flex-shrink-0">
                 <a id="preview-ide" target="_blank" class="mono text-[10px] px-2 py-1 border border-outline-variant hover:border-primary text-on-surface-variant hover:text-primary transition-colors">IDE</a>
@@ -614,25 +615,95 @@
         document.getElementById('preview-tree').innerHTML = '<div class="text-center py-8 text-on-surface-variant">LOADING…</div>';
         document.getElementById('preview-content').innerHTML = '';
         document.getElementById('preview-file-meta').textContent = '—';
+        renderPreviewBanner(p);
         renderPreviewProjectList();
 
         fetch('/api/project/tree?path=' + encodeURIComponent(p.path))
             .then(r => r.json())
-            .then(data => {
+            .then(async data => {
                 if (previewProject !== p) return; // user already switched again
                 if (data.error) {
                     document.getElementById('preview-tree').innerHTML = `<div class="p-3 text-error mono text-[10px]">${escapeHtml(data.error)}</div>`;
                     return;
                 }
                 renderPreviewTree(data.tree);
-                const readme = findReadme(data.tree);
-                if (readme) {
-                    openPreviewFile(readme.path, readme.name);
+
+                // Smart auto-open: most recently-modified dirty file → most
+                // recent file under the tree → README fallback.
+                const target = await pickAutoOpenFile(p, data.tree);
+                if (target) {
+                    if (previewProject !== p) return;
+                    openPreviewFile(target.path, target.name);
                 } else {
                     document.getElementById('preview-content').innerHTML = '<div class="text-center py-16 mono text-[10px] text-on-surface-variant">SELECT A FILE</div>';
                     document.getElementById('preview-file-meta').textContent = '—';
                 }
             });
+    }
+
+    function renderPreviewBanner(p) {
+        const banner = document.getElementById('preview-banner');
+        if (!banner) return;
+        const days = daysSinceModified(p);
+        const dirty = p.gitStatus === 'uncommitted';
+        const stale = isStale(p);
+        const parts = [];
+        if (p.gitBranch) parts.push(`<span class="text-primary">${escapeHtml(p.gitBranch)}</span>`);
+        if (p.lastCommit) parts.push(`<span class="text-on-surface-variant truncate max-w-md inline-block align-bottom" title="${escapeHtml(p.lastCommit)}">${escapeHtml(p.lastCommit)}</span>`);
+        if (days !== null) {
+            const days_label = days === 0 ? 'today' : days === 1 ? '1 day ago' : `${days} days ago`;
+            const cls = stale ? 'text-claude-orange' : 'text-on-surface-variant';
+            parts.push(`<span class="${cls}">${days_label}</span>`);
+        }
+        if (dirty) parts.push('<span class="text-error">DIRTY</span>');
+        if (stale) parts.push('<span class="text-claude-orange">STALE</span>');
+        banner.innerHTML = parts.join('<span class="text-outline mx-1">·</span>');
+    }
+
+    /// Walk a FileNode tree and collect (path, name, mtime) for non-dir entries.
+    function flattenFiles(nodes, out) {
+        for (const n of nodes) {
+            if (n.is_dir) {
+                if (n.children) flattenFiles(n.children, out);
+            } else {
+                out.push({ path: n.path, name: n.name, mtime: n.mtime });
+            }
+        }
+        return out;
+    }
+
+    /// Pick the file the user is most likely to want to see when re-entering
+    /// a project. If the project is dirty, the most recently-modified
+    /// uncommitted file. Otherwise the most recently-modified source file in
+    /// the tree, with README/IDEA as the fallback.
+    async function pickAutoOpenFile(p, tree) {
+        if (p.gitStatus === 'uncommitted') {
+            try {
+                const r = await fetch('/api/git-status?path=' + encodeURIComponent(p.path));
+                const data = await r.json();
+                const candidates = (data.files || [])
+                    .filter(f => f && f.path && f.mtime)
+                    .map(f => ({
+                        path: p.path.replace(/\/$/, '') + '/' + f.path,
+                        name: f.path.split('/').pop(),
+                        mtime: f.mtime,
+                    }))
+                    .sort((a, b) => b.mtime.localeCompare(a.mtime));
+                if (candidates.length) return candidates[0];
+            } catch (e) { /* fall through */ }
+        }
+        // Non-dirty: pick the most-recent source-y file from the tree.
+        const all = flattenFiles(tree, []).filter(f => f.mtime);
+        // Prefer files under src/ or app/ if any; otherwise top-level by mtime.
+        const inSrc = all.filter(f => /\/(src|app|lib)\//.test(f.path));
+        const ranked = (inSrc.length ? inSrc : all).sort((a, b) => b.mtime.localeCompare(a.mtime));
+        if (ranked.length) {
+            // Skip lock/manifest files when there's a more interesting candidate
+            const skipNames = new Set(['Cargo.lock', 'package-lock.json', 'pnpm-lock.yaml', 'yarn.lock', '.gitignore']);
+            const filtered = ranked.filter(f => !skipNames.has(f.name));
+            if (filtered.length) return filtered[0];
+        }
+        return findReadme(tree);
     }
 
     function closePreview() {
@@ -747,7 +818,11 @@
                 const popup = document.createElement('div');
                 popup.className = 'dirty-popup fixed bg-surface-dim border border-outline-variant p-3 z-[999] max-w-sm max-h-48 overflow-y-auto custom-scrollbar shadow-lg';
                 popup.innerHTML = '<div class="mono text-[9px] text-on-surface-variant uppercase mb-2">CHANGED FILES</div>' +
-                    data.files.map(f => `<div class="mono text-[10px] text-on-surface truncate">${escapeHtml(f)}</div>`).join('');
+                    data.files.map(f => {
+                        // Backward-compat: server now returns objects {raw, path, mtime}.
+                        const text = (typeof f === 'string') ? f : (f.raw || f.path || '');
+                        return `<div class="mono text-[10px] text-on-surface truncate">${escapeHtml(text)}</div>`;
+                    }).join('');
                 // Position near the button
                 const rect = btnEl.getBoundingClientRect();
                 popup.style.top = (rect.bottom + 4) + 'px';
