@@ -3,6 +3,7 @@
 
 #[cfg(feature = "swarm")]
 mod agent;
+mod db;
 mod markdown;
 mod project;
 mod skills;
@@ -103,6 +104,13 @@ enum Commands {
         /// Run `ob sync` before scanning the Obsidian vault (for Docker/remote)
         #[arg(long)]
         obsidian_sync: bool,
+
+        /// SQLite database file. Stage 1 of #24: the DB is populated as a
+        /// parallel store; the JSON map is still the source of truth for
+        /// dashboard reads. Re-running `survey` re-imports the resulting
+        /// JSON into this DB so the user can verify the migration.
+        #[arg(short = 'd', long, default_value = "mercator.db")]
+        db: PathBuf,
     },
     /// Export the map as one markdown file per project (one folder of
     /// structured notes that any other tool can consume)
@@ -137,6 +145,11 @@ enum Commands {
         /// Path to the map JSON file
         #[arg(short, long, default_value = "mercator_map.json")]
         map_file: PathBuf,
+
+        /// SQLite database file. Stage 1 of #24: the DB is populated from
+        /// the JSON map on startup; dashboard reads still go through JSON.
+        #[arg(short = 'd', long, default_value = "mercator.db")]
+        db: PathBuf,
 
         /// Local paths to re-scan when the dashboard's refresh button is
         /// clicked. Pass once per root: `--refresh ~/code --refresh ~/oss`.
@@ -584,6 +597,7 @@ async fn main() {
             obsidian_folder,
             obsidian_vault,
             obsidian_sync,
+            db: db_path,
         } => {
             // Default to "." when no paths are given
             if paths.is_empty() {
@@ -698,6 +712,27 @@ async fn main() {
                     );
                 }
 
+                // Stage 1 of #24: keep the JSON map authoritative and
+                // mirror it into a SQLite DB so the user can verify the
+                // migration. Errors here log a warning but don't abort
+                // the survey.
+                match db::open(&db_path) {
+                    Ok(mut conn) => {
+                        let purged = db::purged_sidecar_for_map(&output);
+                        match db::import_from_json(&mut conn, &output, Some(&purged)) {
+                            Ok(stats) => eprintln!(
+                                "  db: {} new, {} updated, {} purged paths -> {}",
+                                stats.projects_inserted,
+                                stats.projects_updated,
+                                stats.purged_inserted,
+                                db_path.display()
+                            ),
+                            Err(e) => eprintln!("  ⚠  db import failed: {}", e),
+                        }
+                    }
+                    Err(e) => eprintln!("  ⚠  could not open db {}: {}", db_path.display(), e),
+                }
+
                 match watch {
                     Some(minutes) => {
                         eprintln!("Next scan in {} min. Press Ctrl+C to stop.", minutes);
@@ -748,8 +783,32 @@ async fn main() {
             port,
             bind,
             map_file,
+            db: db_path,
             refresh,
         } => {
+            // Stage 1 of #24: open the DB and mirror the current JSON map
+            // into it on startup, so the user can validate the SQLite
+            // migration alongside the still-authoritative JSON path.
+            // Failures here are logged but don't block server startup —
+            // the dashboard works without the DB until stage 2 cuts over.
+            match db::open(&db_path) {
+                Ok(mut conn) => {
+                    let purged = db::purged_sidecar_for_map(&map_file);
+                    match db::import_from_json(&mut conn, &map_file, Some(&purged)) {
+                        Ok(stats) => eprintln!(
+                            "DB ready: {} projects, {} purged paths in {} ({} new, {} updated this run)",
+                            db::count_projects(&conn).unwrap_or(0),
+                            db::count_purged(&conn).unwrap_or(0),
+                            db_path.display(),
+                            stats.projects_inserted,
+                            stats.projects_updated,
+                        ),
+                        Err(e) => eprintln!("Warning: db import failed: {}", e),
+                    }
+                }
+                Err(e) => eprintln!("Warning: could not open db {}: {}", db_path.display(), e),
+            }
+
             // Read the map file on each request so browser refresh picks up changes
             let map_path = map_file.clone();
             let serve_map = move || {
