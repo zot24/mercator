@@ -18,7 +18,9 @@ The session ending 2026-05-04 closed three large issues:
 | [#24](https://github.com/zot24/mercator/issues/24) | SQLite + FTS5 migration | Closed — see [ADR 0001](decisions/0001-sqlite-staged-migration.md) |
 | [#25](https://github.com/zot24/mercator/issues/25) | `mercator list` / `search` CLI | Closed (closed by the same PR that finished #24's stage 4b) |
 
-Plus extracted three modules out of `main.rs` ([#11](https://github.com/zot24/mercator/issues/11) waves 2a–2c): `src/skills.rs`, `src/sources.rs`, `src/agent.rs`. `main.rs` went 3604 → 2034 lines (~−44%) over those waves.
+Plus extracted six modules out of `main.rs` (closing [#11](https://github.com/zot24/mercator/issues/11)): `src/project.rs`, `src/markdown.rs`, `src/tags_graph.rs`, `src/skills.rs`, `src/sources.rs`, `src/agent.rs`, plus `src/db.rs` and `src/config.rs` born already-modular. `main.rs` went 3604 → ~2.1k lines and now holds only CLI parsing + HTTP handlers + AppState wiring.
+
+Test count went 0 → 102, closing [#12](https://github.com/zot24/mercator/issues/12). See [ADR 0004](decisions/0004-tdd-discipline.md) for the discipline rule.
 
 ---
 
@@ -130,8 +132,7 @@ Big tickets:
 ### Cross-cutting
 
 - [#21](https://github.com/zot24/mercator/issues/21) — make `swarm` distributable so `cargo install` works (today the path-dep has to be added by hand)
-- [#26](https://github.com/zot24/mercator/issues/26) — auto-discover sources from config — Obsidian + future deploy targets
-- [#12](https://github.com/zot24/mercator/issues/12) — start parser/pure-fn unit tests (largely done — 97 tests now)
+- [#26](https://github.com/zot24/mercator/issues/26) — auto-discover sources from config — Obsidian + future deploy targets (the GitHub/GitLab piece shipped via the `~/.config/mercator/config.toml` work; Obsidian + deploy targets remain)
 
 ---
 
