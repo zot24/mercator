@@ -457,14 +457,6 @@ fn read_purged(map_file: &Path) -> std::collections::HashSet<String> {
         .collect()
 }
 
-fn write_purged(map_file: &Path, set: &std::collections::HashSet<String>) -> Result<(), String> {
-    let path = purge_file_path(map_file);
-    let mut list: Vec<&String> = set.iter().collect();
-    list.sort();
-    let json = serde_json::to_string_pretty(&list).map_err(|e| e.to_string())?;
-    std::fs::write(&path, &json).map_err(|e| format!("Failed to write {}: {}", path.display(), e))
-}
-
 /// `GET /api/map` — return the full project list.
 ///
 /// Stage 2a of #24: read from SQLite, fall back to JSON only if the DB
@@ -530,20 +522,6 @@ async fn purge_project_api(
         db::count_projects(&conn).unwrap_or(0) as usize
     };
 
-    // Mirror to the JSON snapshot so the `mercator survey` CLI (which
-    // still honors `mercator_purged.json`) keeps respecting the
-    // blocklist. Stage 3 drops these writes.
-    if let Ok(projects) = load_map(&state.map_file) {
-        let kept: Vec<Project> = projects
-            .into_iter()
-            .filter(|p| p.path.trim_end_matches('/') != target)
-            .collect();
-        let _ = save_map(&kept, &state.map_file);
-    }
-    let mut purged = read_purged(&state.map_file);
-    purged.insert(target);
-    let _ = write_purged(&state.map_file, &purged);
-
     Json(serde_json::json!({
         "ok": true,
         "removed": removed_count,
@@ -586,12 +564,6 @@ async fn restore_project_api(
             Err(e) => return Json(serde_json::json!({ "ok": false, "error": e })),
         }
     };
-
-    // Mirror to the sidecar so subsequent surveys + dashboard restarts
-    // (which still re-import the sidecar on boot) stay consistent.
-    let mut purged = read_purged(&state.map_file);
-    purged.remove(&target);
-    let _ = write_purged(&state.map_file, &purged);
 
     Json(serde_json::json!({
         "ok": true,
@@ -636,17 +608,11 @@ async fn refresh_survey_api(State(state): State<AppState>) -> Json<serde_json::V
     let mut all = deduplicate_projects(all);
     auto_tag_projects(&mut all);
 
-    // Stage 2c of #24: write to the DB as the source of truth, mirror
-    // to JSON so the next dashboard restart's import remains a no-op
-    // even if someone is running an older binary.
     {
         let mut conn = state.db.lock().await;
         if let Err(e) = db::upsert_projects(&mut conn, &all) {
             return Json(serde_json::json!({ "ok": false, "error": e }));
         }
-    }
-    if let Err(e) = save_map(&all, &state.map_file) {
-        eprintln!("Warning: JSON snapshot write failed: {}", e);
     }
     Json(serde_json::json!({
         "ok": true,
@@ -672,9 +638,6 @@ async fn recategorize_api(State(state): State<AppState>) -> Json<serde_json::Val
         if let Err(e) = db::upsert_projects(&mut conn, &projects) {
             return Json(serde_json::json!({ "ok": false, "error": e }));
         }
-    }
-    if let Err(e) = save_map(&projects, &state.map_file) {
-        eprintln!("Warning: JSON snapshot write failed: {}", e);
     }
     let count = projects.len();
     let tagged = projects.iter().filter(|p| !p.tags.is_empty()).count();
