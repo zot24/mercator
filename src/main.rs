@@ -2479,4 +2479,328 @@ mod tests {
         assert!(!md.contains("## Links"));
         assert!(md.contains("# bare"));
     }
+
+    // ── detect_github_tech_stack ───────────────────────────────────────
+
+    fn gh_repo(language: Option<&str>, topics: Option<Vec<&str>>) -> GitHubRepo {
+        GitHubRepo {
+            name: "demo".into(),
+            description: None,
+            html_url: "https://github.com/x/demo".into(),
+            pushed_at: "2026-05-04T00:00:00Z".into(),
+            default_branch: None,
+            language: language.map(str::to_string),
+            topics: topics.map(|v| v.into_iter().map(str::to_string).collect()),
+        }
+    }
+
+    #[test]
+    fn detect_github_tech_stack_puts_language_first() {
+        let r = gh_repo(Some("Rust"), Some(vec!["cli", "tooling"]));
+        assert_eq!(detect_github_tech_stack(&r), vec!["Rust", "cli", "tooling"]);
+    }
+
+    #[test]
+    fn detect_github_tech_stack_caps_topics_at_three() {
+        let r = gh_repo(Some("Go"), Some(vec!["a", "b", "c", "d", "e"]));
+        // language + first three topics only
+        assert_eq!(detect_github_tech_stack(&r), vec!["Go", "a", "b", "c"]);
+    }
+
+    #[test]
+    fn detect_github_tech_stack_dedups_topic_against_language() {
+        let r = gh_repo(Some("rust"), Some(vec!["rust", "cli"]));
+        // language "rust" preserved; identical topic skipped
+        assert_eq!(detect_github_tech_stack(&r), vec!["rust", "cli"]);
+    }
+
+    #[test]
+    fn detect_github_tech_stack_handles_missing_fields() {
+        assert!(detect_github_tech_stack(&gh_repo(None, None)).is_empty());
+        assert_eq!(
+            detect_github_tech_stack(&gh_repo(None, Some(vec!["docker"]))),
+            vec!["docker"]
+        );
+        assert_eq!(
+            detect_github_tech_stack(&gh_repo(Some("Python"), None)),
+            vec!["Python"]
+        );
+    }
+
+    // ── detect_gitlab_tech_stack ───────────────────────────────────────
+
+    fn gl_repo(tags: Option<Vec<&str>>) -> GitLabRepo {
+        GitLabRepo {
+            name: "demo".into(),
+            description: None,
+            web_url: "https://gitlab.com/x/demo".into(),
+            last_activity_at: "2026-05-04T00:00:00Z".into(),
+            default_branch: None,
+            tag_list: tags.map(|v| v.into_iter().map(str::to_string).collect()),
+        }
+    }
+
+    #[test]
+    fn detect_gitlab_tech_stack_caps_tags_at_three() {
+        let r = gl_repo(Some(vec!["a", "b", "c", "d"]));
+        assert_eq!(detect_gitlab_tech_stack(&r), vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn detect_gitlab_tech_stack_handles_missing_or_empty() {
+        assert!(detect_gitlab_tech_stack(&gl_repo(None)).is_empty());
+        assert!(detect_gitlab_tech_stack(&gl_repo(Some(vec![]))).is_empty());
+    }
+
+    // ── link_obsidian_notes ────────────────────────────────────────────
+
+    fn obsidian_project(name: &str, url: &str, note_path: &str) -> Project {
+        let mut p = project(name, ProjectType::Obsidian, None);
+        p.obsidian_url = Some(url.to_string());
+        p.obsidian_note_path = Some(note_path.to_string());
+        p
+    }
+
+    #[test]
+    fn link_obsidian_notes_merges_url_into_matching_project() {
+        let local = project("My-Cool_Project", ProjectType::Git, None);
+        let obs = obsidian_project(
+            "my cool project",
+            "obsidian://open?vault=v&file=Projects/note",
+            "Projects/note",
+        );
+
+        let merged = link_obsidian_notes(vec![local, obs]);
+        assert_eq!(merged.len(), 1);
+        assert!(matches!(merged[0].project_type, ProjectType::Git));
+        assert_eq!(
+            merged[0].obsidian_url.as_deref(),
+            Some("obsidian://open?vault=v&file=Projects/note")
+        );
+        assert_eq!(
+            merged[0].obsidian_note_path.as_deref(),
+            Some("Projects/note")
+        );
+    }
+
+    #[test]
+    fn link_obsidian_notes_keeps_unmatched_obsidian_standalone() {
+        let local = project("alpha", ProjectType::Git, None);
+        let obs = obsidian_project("beta", "obsidian://x", "Projects/beta");
+        let merged = link_obsidian_notes(vec![local, obs]);
+        assert_eq!(merged.len(), 2);
+        let alpha = merged.iter().find(|p| p.name == "alpha").unwrap();
+        assert!(alpha.obsidian_url.is_none());
+        let beta = merged.iter().find(|p| p.name == "beta").unwrap();
+        assert!(matches!(beta.project_type, ProjectType::Obsidian));
+    }
+
+    #[test]
+    fn link_obsidian_notes_first_obsidian_wins_on_collision() {
+        // Two obsidian notes normalize to the same key — second overwrites first
+        // in the index. Pin this behavior so a future map → fold rewrite doesn't
+        // change which one survives.
+        let local = project("foo", ProjectType::Git, None);
+        let obs1 = obsidian_project("foo", "obsidian://first", "Projects/first");
+        let obs2 = obsidian_project("FOO", "obsidian://second", "Projects/second");
+        let merged = link_obsidian_notes(vec![local, obs1, obs2]);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].obsidian_url.as_deref(), Some("obsidian://second"));
+    }
+
+    // ── detect_tech_stack (FS) ─────────────────────────────────────────
+
+    #[test]
+    fn detect_tech_stack_picks_up_cargo_and_package_json() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\nname=\"x\"\n").unwrap();
+        std::fs::write(dir.path().join("package.json"), "{}").unwrap();
+
+        let stack = detect_tech_stack(dir.path());
+        assert!(stack.contains(&"Rust".to_string()));
+        assert!(stack.contains(&"Node.js".to_string()));
+    }
+
+    #[test]
+    fn detect_tech_stack_dedups_same_tech_across_markers() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "").unwrap();
+        std::fs::write(dir.path().join("Cargo.lock"), "").unwrap();
+
+        let stack = detect_tech_stack(dir.path());
+        assert_eq!(stack.iter().filter(|t| *t == "Rust").count(), 1);
+    }
+
+    #[test]
+    fn detect_tech_stack_returns_empty_for_unknown_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("README.md"), "# nothing").unwrap();
+        assert!(detect_tech_stack(dir.path()).is_empty());
+    }
+
+    // ── detect_agent (FS) ──────────────────────────────────────────────
+
+    #[test]
+    fn detect_agent_finds_claude_via_md_or_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("CLAUDE.md"), "# project").unwrap();
+        assert_eq!(detect_agent(dir.path()).as_deref(), Some("claude"));
+
+        let dir2 = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir2.path().join(".claude")).unwrap();
+        assert_eq!(detect_agent(dir2.path()).as_deref(), Some("claude"));
+    }
+
+    #[test]
+    fn detect_agent_finds_codex_when_no_claude() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("AGENTS.md"), "").unwrap();
+        assert_eq!(detect_agent(dir.path()).as_deref(), Some("codex"));
+    }
+
+    #[test]
+    fn detect_agent_prefers_claude_when_both_present() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("CLAUDE.md"), "").unwrap();
+        std::fs::write(dir.path().join("AGENTS.md"), "").unwrap();
+        assert_eq!(detect_agent(dir.path()).as_deref(), Some("claude"));
+    }
+
+    #[test]
+    fn detect_agent_returns_none_for_plain_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(detect_agent(dir.path()).is_none());
+    }
+
+    // ── survey_projects (FS) ───────────────────────────────────────────
+
+    #[test]
+    fn survey_projects_classifies_git_idea_and_folder() {
+        let root = tempfile::tempdir().unwrap();
+
+        // Git project: has .git
+        let git_proj = root.path().join("alpha");
+        std::fs::create_dir(&git_proj).unwrap();
+        std::fs::create_dir(git_proj.join(".git")).unwrap();
+
+        // Idea project: has IDEA.md but no .git
+        let idea_proj = root.path().join("beta");
+        std::fs::create_dir(&idea_proj).unwrap();
+        std::fs::write(idea_proj.join("IDEA.md"), "# idea").unwrap();
+
+        // Plain folder: no .git, no IDEA.md
+        let folder = root.path().join("gamma");
+        std::fs::create_dir(&folder).unwrap();
+        std::fs::write(folder.join("notes.txt"), "").unwrap();
+
+        let projects = survey_projects(root.path());
+        let by_name: std::collections::HashMap<_, _> =
+            projects.iter().map(|p| (p.name.clone(), p)).collect();
+
+        assert!(matches!(by_name["alpha"].project_type, ProjectType::Git));
+        assert!(matches!(by_name["beta"].project_type, ProjectType::Idea));
+        assert!(matches!(by_name["gamma"].project_type, ProjectType::Folder));
+    }
+
+    #[test]
+    fn survey_projects_skips_target_and_node_modules_siblings() {
+        // Children named target/node_modules should be skipped, even when they
+        // would otherwise classify as plain Folders. Sibling `keep` is the
+        // positive control proving the survey is actually walking the root.
+        // (`.git` siblings are intentionally not tested here — adding `.git`
+        // as a child of root makes root itself a Git repo, which is the
+        // correct survey behavior. Skip-of-`.git` is exercised by
+        // `survey_projects_does_not_descend_into_git_repo`.)
+        let root = tempfile::tempdir().unwrap();
+        for skip in &["target", "node_modules"] {
+            std::fs::create_dir(root.path().join(skip)).unwrap();
+        }
+        std::fs::create_dir(root.path().join("keep")).unwrap();
+
+        let names: std::collections::HashSet<String> = survey_projects(root.path())
+            .into_iter()
+            .map(|p| p.name)
+            .collect();
+        assert!(names.contains("keep"), "got {:?}", names);
+        assert!(!names.contains("target"));
+        assert!(!names.contains("node_modules"));
+    }
+
+    #[test]
+    fn survey_projects_does_not_descend_into_git_repo() {
+        // A Git repo containing a sub-dir with its own .git should NOT yield the
+        // nested project — survey calls skip_current_dir on classification.
+        let root = tempfile::tempdir().unwrap();
+        let outer = root.path().join("outer");
+        std::fs::create_dir(&outer).unwrap();
+        std::fs::create_dir(outer.join(".git")).unwrap();
+        let inner = outer.join("inner");
+        std::fs::create_dir(&inner).unwrap();
+        std::fs::create_dir(inner.join(".git")).unwrap();
+
+        let projects = survey_projects(root.path());
+        let names: Vec<_> = projects.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, vec!["outer"]);
+    }
+
+    // ── scan_obsidian_vault (FS) ───────────────────────────────────────
+
+    #[test]
+    fn scan_obsidian_vault_classifies_subfolders_md_and_at_projects() {
+        let vault = tempfile::tempdir().unwrap();
+        let projects_dir = vault.path().join("Projects");
+        std::fs::create_dir(&projects_dir).unwrap();
+
+        // Subfolder project with a single .md note inside
+        let sub = projects_dir.join("alpha");
+        std::fs::create_dir(&sub).unwrap();
+        std::fs::write(sub.join("alpha.md"), "Some description.\n").unwrap();
+
+        // Standalone .md note
+        std::fs::write(projects_dir.join("beta.md"), "Beta note body.\n").unwrap();
+
+        // Bullet list of ideas
+        std::fs::write(
+            projects_dir.join("@Projects.md"),
+            "# Ideas\n\n- gamma idea\n- delta idea\n\nNot a bullet.\n",
+        )
+        .unwrap();
+
+        let found = scan_obsidian_vault(vault.path(), "Projects", "myvault");
+        let names: std::collections::HashSet<_> = found.iter().map(|p| p.name.as_str()).collect();
+        assert!(names.contains("alpha"));
+        assert!(names.contains("beta"));
+        assert!(names.contains("gamma idea"));
+        assert!(names.contains("delta idea"));
+        // All entries are typed Obsidian
+        assert!(found
+            .iter()
+            .all(|p| matches!(p.project_type, ProjectType::Obsidian)));
+        // Each has an obsidian_url scheme
+        assert!(found.iter().all(|p| p
+            .obsidian_url
+            .as_deref()
+            .unwrap()
+            .starts_with("obsidian://")));
+    }
+
+    #[test]
+    fn scan_obsidian_vault_returns_empty_when_folder_missing() {
+        let vault = tempfile::tempdir().unwrap();
+        let found = scan_obsidian_vault(vault.path(), "Projects", "myvault");
+        assert!(found.is_empty());
+    }
+
+    #[test]
+    fn scan_obsidian_vault_skips_dotfiles() {
+        let vault = tempfile::tempdir().unwrap();
+        let projects_dir = vault.path().join("Projects");
+        std::fs::create_dir(&projects_dir).unwrap();
+        std::fs::write(projects_dir.join(".obsidian.md"), "should be skipped").unwrap();
+        std::fs::write(projects_dir.join("real.md"), "real").unwrap();
+
+        let found = scan_obsidian_vault(vault.path(), "Projects", "myvault");
+        let names: Vec<_> = found.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, vec!["real"]);
+    }
 }
