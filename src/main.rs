@@ -110,6 +110,43 @@ enum Commands {
         #[arg(short = 'd', long, default_value = "mercator.db")]
         db: PathBuf,
     },
+    /// List projects from the DB, optionally filtered by type / tag / tech.
+    /// Output is one project per line, tab-separated columns (type, path,
+    /// name, tags-comma-joined, tech-comma-joined) so you can pipe to
+    /// `awk` / `cut` / `grep`. Closes #25 alongside `search`.
+    List {
+        /// SQLite database file
+        #[arg(short = 'd', long, default_value = "mercator.db")]
+        db: PathBuf,
+
+        /// Filter by project type (Git, Folder, Idea, GitHub, GitLab, Obsidian)
+        #[arg(short = 't', long = "type")]
+        project_type: Option<String>,
+
+        /// Filter by tag (exact match — case-sensitive)
+        #[arg(long)]
+        tag: Option<String>,
+
+        /// Filter by tech-stack entry (e.g. "Rust", "Node.js")
+        #[arg(long)]
+        tech: Option<String>,
+    },
+    /// Full-text search projects by name, description, and tags. Each
+    /// whitespace-separated token must match (AND); punctuation inside
+    /// a word is literal so `cli-tool` finds the project named
+    /// `cli-tool`. Backed by SQLite FTS5.
+    ///
+    /// Note: tech_stack is not full-text-indexed; use `mercator list
+    /// --tech Rust` to filter by tech-stack entry.
+    /// Closes #25 alongside `list`.
+    Search {
+        /// FTS5 query string. Quote multi-word queries from the shell.
+        query: String,
+
+        /// SQLite database file
+        #[arg(short = 'd', long, default_value = "mercator.db")]
+        db: PathBuf,
+    },
     /// Export the map as one markdown file per project (one folder of
     /// structured notes that any other tool can consume)
     Export {
@@ -653,6 +690,28 @@ async fn skills_api(State(state): State<AppState>) -> Json<Vec<crate::skills::Sk
     Json(crate::skills::compute_skill_groups(&state.map_file))
 }
 
+/// Tab-separated single-line project row for `mercator list` / `search`.
+/// Columns: type, path, name, tags (comma-joined), tech (comma-joined).
+/// Stable for shell pipelines (`awk -F'\t'`, `cut -f`, `grep`).
+fn print_project_row(p: &Project) {
+    let project_type = match p.project_type {
+        ProjectType::Git => "Git",
+        ProjectType::Folder => "Folder",
+        ProjectType::Idea => "Idea",
+        ProjectType::GitHub => "GitHub",
+        ProjectType::GitLab => "GitLab",
+        ProjectType::Obsidian => "Obsidian",
+    };
+    println!(
+        "{}\t{}\t{}\t{}\t{}",
+        project_type,
+        p.path,
+        p.name,
+        p.tags.join(","),
+        p.tech_stack.join(","),
+    );
+}
+
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
@@ -837,6 +896,56 @@ async fn main() {
                     None => break,
                 }
             }
+        }
+        Commands::List {
+            db: db_path,
+            project_type,
+            tag,
+            tech,
+        } => {
+            let conn = match db::open(&db_path) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("Error: open db {}: {}", db_path.display(), e);
+                    std::process::exit(1);
+                }
+            };
+            let filter = db::ListFilter {
+                project_type,
+                tag,
+                tech,
+            };
+            let projects = match db::list_projects(&conn, &filter) {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("Error: {}", e);
+                    std::process::exit(1);
+                }
+            };
+            for p in &projects {
+                print_project_row(p);
+            }
+            eprintln!("\n{} projects", projects.len());
+        }
+        Commands::Search { query, db: db_path } => {
+            let conn = match db::open(&db_path) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("Error: open db {}: {}", db_path.display(), e);
+                    std::process::exit(1);
+                }
+            };
+            let projects = match db::search_projects(&conn, &query) {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("Error: {}", e);
+                    std::process::exit(1);
+                }
+            };
+            for p in &projects {
+                print_project_row(p);
+            }
+            eprintln!("\n{} projects matched {:?}", projects.len(), query);
         }
         Commands::Export {
             out_dir,
