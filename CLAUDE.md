@@ -43,7 +43,6 @@ mercator/
 ├── .github/workflows/ci.yml # rustfmt + clippy + test, gates PRs to master
 ├── Cargo.toml               # `swarm` feature is opt-in; default build skips agent runner
 ├── Dockerfile               # alpine + musl; serves on 0.0.0.0 (see #6)
-├── mercator.toml.example    # documents a config surface that isn't wired yet (see #13)
 ├── mercator_map.json        # generated; the entire map lives here as JSON (see #24)
 └── mercator_purged.json     # generated; sticky purge blocklist
 ```
