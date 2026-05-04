@@ -510,35 +510,62 @@ async fn purge_project_api(
     State(state): State<AppState>,
     Json(req): Json<PurgeRequest>,
 ) -> Json<serde_json::Value> {
-    let projects = match load_map(&state.map_file) {
-        Ok(p) => p,
-        Err(e) => return Json(serde_json::json!({ "ok": false, "error": e })),
-    };
-    let before = projects.len();
     let target = req.path.trim_end_matches('/').to_string();
-    let kept: Vec<Project> = projects
-        .into_iter()
-        .filter(|p| p.path.trim_end_matches('/') != target)
-        .collect();
-    let removed = before - kept.len();
 
+    // Source of truth: the DB. We delete the projects row + insert into
+    // purged in a single transaction so the dashboard can never see a
+    // half-purged state.
+    let (removed_count, purged_total) = {
+        let mut conn = state.db.lock().await;
+        match db::purge_project(&mut conn, &target) {
+            Ok((_, project_was_present)) => {
+                let remaining = db::count_purged(&conn).unwrap_or(0);
+                (usize::from(project_was_present), remaining as usize)
+            }
+            Err(e) => return Json(serde_json::json!({ "ok": false, "error": e })),
+        }
+    };
+    let remaining = {
+        let conn = state.db.lock().await;
+        db::count_projects(&conn).unwrap_or(0) as usize
+    };
+
+    // Mirror to the JSON snapshot so the `mercator survey` CLI (which
+    // still honors `mercator_purged.json`) keeps respecting the
+    // blocklist. Stage 3 drops these writes.
+    if let Ok(projects) = load_map(&state.map_file) {
+        let kept: Vec<Project> = projects
+            .into_iter()
+            .filter(|p| p.path.trim_end_matches('/') != target)
+            .collect();
+        let _ = save_map(&kept, &state.map_file);
+    }
     let mut purged = read_purged(&state.map_file);
-    purged.insert(target.clone());
-    if let Err(e) = write_purged(&state.map_file, &purged) {
-        return Json(serde_json::json!({ "ok": false, "error": e }));
-    }
-    if let Err(e) = save_map(&kept, &state.map_file) {
-        return Json(serde_json::json!({ "ok": false, "error": e }));
-    }
-    Json(
-        serde_json::json!({ "ok": true, "removed": removed, "remaining": kept.len(), "purged_total": purged.len() }),
-    )
+    purged.insert(target);
+    let _ = write_purged(&state.map_file, &purged);
+
+    Json(serde_json::json!({
+        "ok": true,
+        "removed": removed_count,
+        "remaining": remaining,
+        "purged_total": purged_total,
+    }))
 }
 
 async fn purged_list_api(State(state): State<AppState>) -> Json<Vec<String>> {
-    let mut list: Vec<String> = read_purged(&state.map_file).into_iter().collect();
-    list.sort();
-    Json(list)
+    let conn = state.db.lock().await;
+    match db::list_purged(&conn) {
+        Ok(list) => Json(list),
+        Err(e) => {
+            eprintln!(
+                "Warning: db purged list failed ({}); falling back to JSON",
+                e
+            );
+            let mut list: Vec<String> = read_purged(&state.map_file).into_iter().collect();
+            list.sort();
+            Json(list)
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -550,15 +577,27 @@ async fn restore_project_api(
     State(state): State<AppState>,
     Json(req): Json<RestoreRequest>,
 ) -> Json<serde_json::Value> {
-    let mut purged = read_purged(&state.map_file);
     let target = req.path.trim_end_matches('/').to_string();
-    let removed = purged.remove(&target);
-    if let Err(e) = write_purged(&state.map_file, &purged) {
-        return Json(serde_json::json!({ "ok": false, "error": e }));
-    }
-    Json(
-        serde_json::json!({ "ok": true, "removed_from_blocklist": removed, "remaining": purged.len() }),
-    )
+
+    let (removed, remaining) = {
+        let conn = state.db.lock().await;
+        match db::restore_purged(&conn, &target) {
+            Ok(was_present) => (was_present, db::count_purged(&conn).unwrap_or(0) as usize),
+            Err(e) => return Json(serde_json::json!({ "ok": false, "error": e })),
+        }
+    };
+
+    // Mirror to the sidecar so subsequent surveys + dashboard restarts
+    // (which still re-import the sidecar on boot) stay consistent.
+    let mut purged = read_purged(&state.map_file);
+    purged.remove(&target);
+    let _ = write_purged(&state.map_file, &purged);
+
+    Json(serde_json::json!({
+        "ok": true,
+        "removed_from_blocklist": removed,
+        "remaining": remaining,
+    }))
 }
 
 /// API endpoint: re-run auto-categorization against the existing map and save it
