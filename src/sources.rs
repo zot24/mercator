@@ -549,24 +549,35 @@ pub fn normalize_remote_url(url: &str) -> String {
 /// Merge duplicate projects: when a local Git repo has the same remote URL as a
 /// GitHub/GitLab repo, keep the local one and enrich it with remote metadata.
 pub fn deduplicate_projects(projects: Vec<Project>) -> Vec<Project> {
-    // Index remote projects by normalized URL
+    // Two project sets:
+    //   `remote_by_url`  — fetched-via-API entries (GitHub/GitLab) keyed
+    //                      by normalized remote URL. Locals match
+    //                      against this map; each entry is consumed at
+    //                      most once.
+    //   `local_projects` — everything filesystem-backed, plus any
+    //                      remote-typed row that lacks a remote URL.
+    //                      All local rows survive dedup; we never key
+    //                      locals by URL (which would collapse multiple
+    //                      clones of the same upstream into one).
+    //
+    // Locals are detected by their `path` being a filesystem path; the
+    // remote fetchers set `path` to the `html_url` / `web_url` (always
+    // `https://…`), so the prefix check is unambiguous.
     let mut remote_by_url: HashMap<String, Project> = HashMap::new();
     let mut local_projects: Vec<Project> = Vec::new();
 
     for p in projects {
-        match p.project_type {
-            ProjectType::GitHub | ProjectType::GitLab => {
-                if let Some(ref url) = p.remote_url {
-                    let key = normalize_remote_url(url);
-                    remote_by_url.insert(key, p);
-                } else {
-                    // No URL to match on, keep as-is
-                    local_projects.push(p);
-                }
-            }
-            _ => {
+        let is_remote_fetched = p.path.starts_with("https://") || p.path.starts_with("http://");
+        let remote_typed = matches!(p.project_type, ProjectType::GitHub | ProjectType::GitLab);
+        if is_remote_fetched && remote_typed {
+            if let Some(ref url) = p.remote_url {
+                let key = normalize_remote_url(url);
+                remote_by_url.insert(key, p);
+            } else {
                 local_projects.push(p);
             }
+        } else {
+            local_projects.push(p);
         }
     }
 
