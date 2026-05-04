@@ -314,6 +314,51 @@ pub fn count_purged(conn: &Connection) -> Result<u64, String> {
         .map_err(|e| format!("count purged: {}", e))
 }
 
+/// Atomically purge a project: add it to the blocklist and drop the
+/// `projects` row (FK cascades clean up the M2M rows + obsidian link).
+/// Returns `(blocklist_was_new, project_was_present)` so the handler
+/// can report counts mirroring today's JSON-side response.
+pub fn purge_project(conn: &mut Connection, path: &str) -> Result<(bool, bool), String> {
+    let tx = conn
+        .transaction()
+        .map_err(|e| format!("begin purge tx: {}", e))?;
+    let blocklist_inserted = tx
+        .execute(
+            "INSERT OR IGNORE INTO purged(path) VALUES (?)",
+            params![path],
+        )
+        .map_err(|e| format!("insert purged({}): {}", path, e))?
+        == 1;
+    let project_deleted = tx
+        .execute("DELETE FROM projects WHERE path = ?", params![path])
+        .map_err(|e| format!("delete project({}): {}", path, e))?
+        == 1;
+    tx.commit().map_err(|e| format!("commit purge: {}", e))?;
+    Ok((blocklist_inserted, project_deleted))
+}
+
+/// Remove a path from the blocklist. Returns `true` if a row was actually
+/// removed (i.e. it was previously purged).
+pub fn restore_purged(conn: &Connection, path: &str) -> Result<bool, String> {
+    conn.execute("DELETE FROM purged WHERE path = ?", params![path])
+        .map(|n| n == 1)
+        .map_err(|e| format!("delete purged({}): {}", path, e))
+}
+
+/// List purged paths sorted alphabetically — matches the order the JSON
+/// sidecar handler returned today, so the dashboard's settings panel
+/// doesn't see a behavior change.
+pub fn list_purged(conn: &Connection) -> Result<Vec<String>, String> {
+    let mut stmt = conn
+        .prepare("SELECT path FROM purged ORDER BY path")
+        .map_err(|e| format!("prepare list_purged: {}", e))?;
+    let rows = stmt
+        .query_map([], |r| r.get::<_, String>(0))
+        .map_err(|e| format!("query purged: {}", e))?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("read purged: {}", e))
+}
+
 /// Read every project out of the DB, fully hydrated (tags, tech_stack,
 /// obsidian link). Used by tests today; the stage-2 cutover for #24
 /// switches `/api/map` and friends to call this in place of `load_map`.
@@ -596,6 +641,90 @@ mod tests {
         assert!(
             secs_section.contains('.'),
             "expected decimal in seconds, got {secs_section:?} (full: {last_seen:?})"
+        );
+    }
+
+    #[test]
+    fn purge_project_drops_row_and_cascades() {
+        let dir = tempfile::tempdir().unwrap();
+        let map_path = dir.path().join("map.json");
+        let mut p = sample_project("alpha", "/tmp/alpha", ProjectType::Git);
+        p.obsidian_url = Some("obsidian://x".to_string());
+        p.obsidian_note_path = Some("Projects/alpha".to_string());
+        save_map(&[p], &map_path).unwrap();
+        let mut conn = open(&dir.path().join("db.sqlite")).unwrap();
+        import_from_json(&mut conn, &map_path, None).unwrap();
+
+        let (blocklist_new, project_deleted) = purge_project(&mut conn, "/tmp/alpha").unwrap();
+        assert!(blocklist_new);
+        assert!(project_deleted);
+        assert_eq!(count_projects(&conn).unwrap(), 0);
+        assert_eq!(count_purged(&conn).unwrap(), 1);
+
+        // FK cascades dropped the M2M and obsidian rows.
+        let tag_links: i64 = conn
+            .query_row("SELECT COUNT(*) FROM project_tags", [], |r| r.get(0))
+            .unwrap();
+        let tech_links: i64 = conn
+            .query_row("SELECT COUNT(*) FROM project_tech", [], |r| r.get(0))
+            .unwrap();
+        let obs_rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM obsidian_links", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(tag_links, 0);
+        assert_eq!(tech_links, 0);
+        assert_eq!(obs_rows, 0);
+    }
+
+    #[test]
+    fn purge_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let map_path = dir.path().join("map.json");
+        save_map(
+            &[sample_project("alpha", "/tmp/alpha", ProjectType::Git)],
+            &map_path,
+        )
+        .unwrap();
+        let mut conn = open(&dir.path().join("db.sqlite")).unwrap();
+        import_from_json(&mut conn, &map_path, None).unwrap();
+
+        let first = purge_project(&mut conn, "/tmp/alpha").unwrap();
+        assert_eq!(first, (true, true));
+        let second = purge_project(&mut conn, "/tmp/alpha").unwrap();
+        // Already on the blocklist, project already gone.
+        assert_eq!(second, (false, false));
+    }
+
+    #[test]
+    fn restore_purged_removes_from_blocklist() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = open(&dir.path().join("db.sqlite")).unwrap();
+        conn.execute("INSERT INTO purged(path) VALUES ('/tmp/x'), ('/tmp/y')", [])
+            .unwrap();
+        assert_eq!(count_purged(&conn).unwrap(), 2);
+
+        assert!(restore_purged(&conn, "/tmp/x").unwrap());
+        // Restoring an already-restored path is a no-op (returns false).
+        assert!(!restore_purged(&conn, "/tmp/x").unwrap());
+        assert_eq!(count_purged(&conn).unwrap(), 1);
+    }
+
+    #[test]
+    fn list_purged_returns_sorted_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = open(&dir.path().join("db.sqlite")).unwrap();
+        // Insert in non-sorted order.
+        for path in ["/tmp/c", "/tmp/a", "/tmp/b"] {
+            conn.execute("INSERT INTO purged(path) VALUES (?)", params![path])
+                .unwrap();
+        }
+        assert_eq!(
+            list_purged(&conn).unwrap(),
+            vec![
+                "/tmp/a".to_string(),
+                "/tmp/b".to_string(),
+                "/tmp/c".to_string()
+            ]
         );
     }
 
