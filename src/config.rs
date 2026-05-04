@@ -94,7 +94,6 @@ pub fn load() -> Result<Config, String> {
 /// Write the config atomically. On unix the file mode is set to 0600
 /// (owner-only read/write) since it carries tokens. On other platforms
 /// the file is written with the OS default permissions.
-#[allow(dead_code)] // wired in the settings-POST follow-up PR
 pub fn save_to(path: &Path, cfg: &Config) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)

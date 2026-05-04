@@ -870,25 +870,101 @@
         setTimeout(() => el.remove(), 2000);
     }
 
-    function getSettings() {
-        const defaults = { localPaths: ['/Users/anon/Desktop/code'], github: { user: '', token: '' }, gitlab: { user: '', token: '', url: 'https://gitlab.com' } };
-        const stored = localStorage.getItem('mercator-settings');
-        return stored ? JSON.parse(stored) : defaults;
+    // localPaths + gitlab.url stay in localStorage today — they're
+    // dashboard-side preferences, not server config. Tokens migrated
+    // to ~/.config/mercator/config.toml via /api/settings (#2).
+    function getLocalPrefs() {
+        const defaults = { localPaths: ['/Users/anon/Desktop/code'], gitlabUrl: 'https://gitlab.com' };
+        const stored = localStorage.getItem('mercator-local-prefs');
+        if (stored) return { ...defaults, ...JSON.parse(stored) };
+        // Legacy: read out of the old `mercator-settings` key if present
+        const legacy = localStorage.getItem('mercator-settings');
+        if (legacy) {
+            try {
+                const s = JSON.parse(legacy);
+                return {
+                    localPaths: s.localPaths || defaults.localPaths,
+                    gitlabUrl: (s.gitlab && s.gitlab.url) || defaults.gitlabUrl,
+                };
+            } catch (_) { /* fall through */ }
+        }
+        return defaults;
     }
+    function saveLocalPrefs(p) { localStorage.setItem('mercator-local-prefs', JSON.stringify(p)); }
 
-    function saveSettingsToStorage(s) { localStorage.setItem('mercator-settings', JSON.stringify(s)); }
+    // Track whether the user has typed into a token field since the
+    // settings modal opened. Empty input on save → no change to the
+    // stored token (the placeholder explains this); typed input →
+    // server replaces. Ensures opening + closing settings doesn't
+    // accidentally erase a configured token.
+    const tokenTouched = { github: false, gitlab: false };
 
     function openSettings() {
-        const s = getSettings();
-        document.getElementById('local-paths').value = s.localPaths.join('\n');
-        document.getElementById('github-user').value = s.github.user;
-        document.getElementById('github-token').value = s.github.token;
-        document.getElementById('gitlab-user').value = s.gitlab.user;
-        document.getElementById('gitlab-url').value = s.gitlab.url;
-        document.getElementById('gitlab-token').value = s.gitlab.token;
+        // Local preferences (paths + gitlab url) — read from localStorage
+        const prefs = getLocalPrefs();
+        document.getElementById('local-paths').value = prefs.localPaths.join('\n');
+        document.getElementById('gitlab-url').value = prefs.gitlabUrl;
+
+        // Server-side state (users + token-set bits) — read from /api/settings
+        document.getElementById('github-user').value = '';
+        document.getElementById('github-token').value = '';
+        document.getElementById('gitlab-user').value = '';
+        document.getElementById('gitlab-token').value = '';
+        tokenTouched.github = false;
+        tokenTouched.gitlab = false;
+        fetch('/api/settings').then(r => r.json()).then(s => {
+            document.getElementById('github-user').value = s.github_user || '';
+            document.getElementById('gitlab-user').value = s.gitlab_user || '';
+            const ghTok = document.getElementById('github-token');
+            ghTok.placeholder = s.github_token_set ? '(saved — leave blank to keep)' : 'ghp_xxxxx';
+            const glTok = document.getElementById('gitlab-token');
+            glTok.placeholder = s.gitlab_token_set ? '(saved — leave blank to keep)' : 'glpat-xxxxx';
+            // One-time migration: if an old `mercator-settings` row carries
+            // tokens, push them server-side so the user doesn't have to
+            // re-enter, then drop them from localStorage.
+            migrateLegacyTokensIfPresent(s);
+        }).catch(_ => { /* server might be offline — leave inputs empty */ });
+
         loadPurgedList();
         const m = document.getElementById('settings-modal');
         m.classList.remove('hidden'); m.classList.add('flex');
+    }
+
+    function migrateLegacyTokensIfPresent(currentSettings) {
+        const legacy = localStorage.getItem('mercator-settings');
+        if (!legacy) return;
+        let parsed;
+        try { parsed = JSON.parse(legacy); } catch (_) { return; }
+        const ghTok = parsed.github && parsed.github.token;
+        const glTok = parsed.gitlab && parsed.gitlab.token;
+        const needsMigration =
+            (ghTok && !currentSettings.github_token_set) ||
+            (glTok && !currentSettings.gitlab_token_set);
+        if (!needsMigration) {
+            // Nothing meaningful to migrate; just drop the old key.
+            localStorage.removeItem('mercator-settings');
+            return;
+        }
+        const payload = {};
+        if (ghTok) payload.github_token = ghTok;
+        if (glTok) payload.gitlab_token = glTok;
+        if (parsed.github && parsed.github.user) payload.github_user = parsed.github.user;
+        if (parsed.gitlab && parsed.gitlab.user) payload.gitlab_user = parsed.gitlab.user;
+        fetch('/api/settings', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        }).then(r => r.json()).then(data => {
+            if (!data.ok) return;
+            localStorage.removeItem('mercator-settings');
+            showToast('TOKENS MIGRATED TO ~/.config/mercator/config.toml');
+            // Re-open the modal so the user sees the updated state.
+            const s = data.settings;
+            document.getElementById('github-user').value = s.github_user || '';
+            document.getElementById('gitlab-user').value = s.gitlab_user || '';
+            document.getElementById('github-token').placeholder = s.github_token_set ? '(saved — leave blank to keep)' : 'ghp_xxxxx';
+            document.getElementById('gitlab-token').placeholder = s.gitlab_token_set ? '(saved — leave blank to keep)' : 'glpat-xxxxx';
+        });
     }
 
     function loadPurgedList() {
@@ -934,12 +1010,37 @@
     }
 
     function saveSettings() {
-        const s = {
+        // Local preferences (paths + gitlab url) — localStorage only.
+        saveLocalPrefs({
             localPaths: document.getElementById('local-paths').value.split('\n').filter(p => p.trim()),
-            github: { user: document.getElementById('github-user').value.trim(), token: document.getElementById('github-token').value.trim() },
-            gitlab: { user: document.getElementById('gitlab-user').value.trim(), token: document.getElementById('gitlab-token').value.trim(), url: document.getElementById('gitlab-url').value.trim() || 'https://gitlab.com' }
+            gitlabUrl: document.getElementById('gitlab-url').value.trim() || 'https://gitlab.com',
+        });
+
+        // Server-side: users + tokens via POST /api/settings. Token
+        // fields are sent only if the user actually typed into them
+        // (tokenTouched), so an unchanged blank input doesn't erase a
+        // stored token.
+        const payload = {
+            github_user: document.getElementById('github-user').value.trim(),
+            gitlab_user: document.getElementById('gitlab-user').value.trim(),
         };
-        saveSettingsToStorage(s); closeSettings(); refreshSurvey();
+        if (tokenTouched.github) {
+            const v = document.getElementById('github-token').value.trim();
+            if (v) payload.github_token = v; else payload.github_clear_token = true;
+        }
+        if (tokenTouched.gitlab) {
+            const v = document.getElementById('gitlab-token').value.trim();
+            if (v) payload.gitlab_token = v; else payload.gitlab_clear_token = true;
+        }
+        fetch('/api/settings', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        }).then(r => r.json()).then(data => {
+            if (!data.ok) { showToast('SETTINGS SAVE FAILED: ' + (data.error || 'unknown'), true); return; }
+            closeSettings();
+            refreshSurvey();
+        }).catch(e => showToast('SETTINGS ERROR: ' + e, true));
     }
 
     function refreshSurvey() {
@@ -1505,6 +1606,8 @@
     document.getElementById('sort').addEventListener('change', renderProjects);
     document.getElementById('tech-filter').addEventListener('change', onFilterChange);
     document.getElementById('settings-modal').addEventListener('click', e => { if (e.target === e.currentTarget) closeSettings(); });
+    document.getElementById('github-token').addEventListener('input', () => { tokenTouched.github = true; });
+    document.getElementById('gitlab-token').addEventListener('input', () => { tokenTouched.gitlab = true; });
 
     // Keyboard shortcut: / to focus search
     document.addEventListener('keydown', e => {
