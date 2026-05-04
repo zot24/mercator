@@ -64,6 +64,7 @@ Native `async fn` in traits stabilized in Rust 1.75 but isn't dyn-compatible wit
 
 - New providers can't be loaded as plugins from a config file or CLI flag — adding one is a code change. For a single-user tool with three known providers in flight, this is fine. If Mercator ever grows a plugin loader, the `Box<dyn Source>` path is still open; this ADR doesn't close it.
 - The survey loop is sequential, so adding GitHub + GitLab fetches doesn't run them in parallel. On the corpora we've measured (~50 GitHub repos), the wire latency dominates and concurrency would help. Captured as follow-up; not blocking #8.
+  - **Update (2026-05-04):** the sequential loop was replaced with `futures::future::join_all` after this ADR landed — the trait scaffold was the prerequisite, the parallelism became a one-line follow-up. Logs are still emitted in source order (intent lines before the await, result lines after the join) so the eprintln stream stays deterministic. The trade-off the ADR called out — "concurrent fetch lets all sources fail independently" — is now what users see; that's what we wanted.
 
 ## Reasoning we want to remember
 
