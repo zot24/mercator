@@ -144,6 +144,7 @@ Scan a directory for projects and write results to JSON.
 
 ```bash
 mercator survey ~/code                                    # Local only
+mercator survey ~/code ~/work/repos ~/oss                 # Multiple roots in one run
 mercator survey ~/code --github zot24                     # + GitHub public repos (60/hr cap)
 mercator survey ~/code --github zot24 \
   --github-token ghp_xxx                                  # + private repos, 5000/hr cap

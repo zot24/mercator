@@ -35,9 +35,11 @@ struct Cli {
 enum Commands {
     /// Survey a directory for projects
     Survey {
-        /// Path to survey (default: current directory)
-        #[arg(default_value = ".")]
-        path: PathBuf,
+        /// One or more paths to survey (default: current directory). Repeat
+        /// the positional arg to scan multiple roots in a single run, e.g.
+        /// `mercator survey ~/code ~/work/repos ~/oss`.
+        #[arg(num_args = 0..)]
+        paths: Vec<PathBuf>,
 
         /// Output file for the survey results
         #[arg(short, long, default_value = "mercator_map.json")]
@@ -2598,7 +2600,7 @@ async fn main() {
 
     match cli.command {
         Commands::Survey {
-            path,
+            mut paths,
             output,
             github,
             github_token,
@@ -2611,11 +2613,20 @@ async fn main() {
             obsidian_vault,
             obsidian_sync,
         } => {
+            // Default to "." when no paths are given
+            if paths.is_empty() {
+                paths.push(PathBuf::from("."));
+            }
             loop {
-                eprintln!("Surveying {}...", path.display());
-
-                let mut all_projects = survey_projects(&path);
-                let local_count = all_projects.len();
+                let mut all_projects: Vec<Project> = Vec::new();
+                let mut local_count = 0;
+                for path in &paths {
+                    eprintln!("Surveying {}...", path.display());
+                    let found = survey_projects(path);
+                    eprintln!("  {} found", found.len());
+                    local_count += found.len();
+                    all_projects.extend(found);
+                }
 
                 if let Some(gh_user) = &github {
                     let auth_label = if github_token.is_some() {
