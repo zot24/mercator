@@ -111,16 +111,9 @@ pub fn import_from_json(
     // Projects
     if map_json_path.exists() {
         let projects = load_map(map_json_path).map_err(|e| format!("read map.json: {}", e))?;
-        let tx = conn.transaction().map_err(|e| format!("begin tx: {}", e))?;
-        for p in &projects {
-            let inserted = upsert_project(&tx, p)?;
-            if inserted {
-                stats.projects_inserted += 1;
-            } else {
-                stats.projects_updated += 1;
-            }
-        }
-        tx.commit().map_err(|e| format!("commit tx: {}", e))?;
+        let upsert_stats = upsert_projects(conn, &projects)?;
+        stats.projects_inserted = upsert_stats.projects_inserted;
+        stats.projects_updated = upsert_stats.projects_updated;
     }
 
     // Purged sidecar
@@ -145,6 +138,28 @@ pub fn import_from_json(
         }
     }
 
+    Ok(stats)
+}
+
+/// Bulk upsert a slice of projects in a single transaction. Returns
+/// counts of newly-inserted vs updated rows. Used by stage-2c handlers
+/// that already hold a `Vec<Project>` (refresh re-survey, recategorize)
+/// and want to push it to the DB without going through a JSON file.
+pub fn upsert_projects(conn: &mut Connection, projects: &[Project]) -> Result<ImportStats, String> {
+    let mut stats = ImportStats::default();
+    let tx = conn
+        .transaction()
+        .map_err(|e| format!("begin upsert tx: {}", e))?;
+    for p in projects {
+        let inserted = upsert_project(&tx, p)?;
+        if inserted {
+            stats.projects_inserted += 1;
+        } else {
+            stats.projects_updated += 1;
+        }
+    }
+    tx.commit()
+        .map_err(|e| format!("commit upsert tx: {}", e))?;
     Ok(stats)
 }
 

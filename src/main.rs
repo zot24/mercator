@@ -622,13 +622,31 @@ async fn refresh_survey_api(State(state): State<AppState>) -> Json<serde_json::V
         }));
         all.extend(found);
     }
-    // Honour the existing purge blocklist
-    let purged = read_purged(&state.map_file);
+    // Honour the existing purge blocklist (DB is the source of truth;
+    // fall back to the JSON sidecar so a transient DB hiccup doesn't
+    // re-introduce a project the user explicitly purged).
+    let purged: std::collections::HashSet<String> = {
+        let conn = state.db.lock().await;
+        match db::list_purged(&conn) {
+            Ok(list) => list.into_iter().collect(),
+            Err(_) => read_purged(&state.map_file),
+        }
+    };
     all.retain(|p| !purged.contains(p.path.trim_end_matches('/')));
     let mut all = deduplicate_projects(all);
     auto_tag_projects(&mut all);
+
+    // Stage 2c of #24: write to the DB as the source of truth, mirror
+    // to JSON so the next dashboard restart's import remains a no-op
+    // even if someone is running an older binary.
+    {
+        let mut conn = state.db.lock().await;
+        if let Err(e) = db::upsert_projects(&mut conn, &all) {
+            return Json(serde_json::json!({ "ok": false, "error": e }));
+        }
+    }
     if let Err(e) = save_map(&all, &state.map_file) {
-        return Json(serde_json::json!({ "ok": false, "error": e }));
+        eprintln!("Warning: JSON snapshot write failed: {}", e);
     }
     Json(serde_json::json!({
         "ok": true,
@@ -638,13 +656,25 @@ async fn refresh_survey_api(State(state): State<AppState>) -> Json<serde_json::V
 }
 
 async fn recategorize_api(State(state): State<AppState>) -> Json<serde_json::Value> {
-    let mut projects = match load_map(&state.map_file) {
-        Ok(p) => p,
-        Err(e) => return Json(serde_json::json!({ "ok": false, "error": e })),
+    // Read the live state from the DB — it's been the source of truth
+    // since stage 2a, and we want recategorize to see whatever purges /
+    // restores have happened.
+    let mut projects = {
+        let conn = state.db.lock().await;
+        match db::load_all_projects(&conn) {
+            Ok(p) => p,
+            Err(e) => return Json(serde_json::json!({ "ok": false, "error": e })),
+        }
     };
     auto_tag_projects(&mut projects);
+    {
+        let mut conn = state.db.lock().await;
+        if let Err(e) = db::upsert_projects(&mut conn, &projects) {
+            return Json(serde_json::json!({ "ok": false, "error": e }));
+        }
+    }
     if let Err(e) = save_map(&projects, &state.map_file) {
-        return Json(serde_json::json!({ "ok": false, "error": e }));
+        eprintln!("Warning: JSON snapshot write failed: {}", e);
     }
     let count = projects.len();
     let tagged = projects.iter().filter(|p| !p.tags.is_empty()).count();
