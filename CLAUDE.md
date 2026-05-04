@@ -4,13 +4,32 @@
 
 This file is for Claude Code agents picking up the codebase. The README is the user-facing pitch; this is the operator's manual.
 
+## Quickstart
+
+If you just want to run it locally and see what it does:
+
+```bash
+cargo run --release -- survey ~/Desktop/code
+cargo run --release -- serve
+# open http://127.0.0.1:3000
+```
+
+`survey` creates `mercator.db` (SQLite) + `mercator_map.json` (legacy snapshot) in the working directory. `serve` reads from the DB.
+
+## Read this first
+
+- **[docs/STATUS.md](docs/STATUS.md)** — current state, what just shipped, where we're heading. The most useful single doc when picking the project up after time away.
+- **[GOALS.md](GOALS.md)** — long-term direction (Phase 1/2/3).
+- **[docs/decisions/](docs/decisions/)** — ADRs for the non-obvious design calls. If you're about to revisit one of these decisions, read the ADR first; it captures alternatives we already weighed.
+- **[Project board](https://github.com/users/zot24/projects/12)** — what's queued.
+
 ## What it does
 
 Mercator is a Rust CLI + single-file web dashboard. It surveys local directories, GitHub, GitLab, and an Obsidian vault, deduplicates the result, auto-tags, and serves it on a localhost port. See [`README.md`](README.md) for the full feature list.
 
 ## Status
 
-v0.1.x. Single-user. Breaking changes are likely. The [Goals doc](GOALS.md) (Phase 1/2/3 split) and the [project board](https://github.com/users/zot24/projects/12) are authoritative for what's queued.
+v0.1.x. Single-user. Breaking changes are likely. Phase 1 of the [Goals doc](GOALS.md) is essentially complete as of 2026-05-04 — see [docs/STATUS.md](docs/STATUS.md) for the precise picture.
 
 ## Commands
 
@@ -18,7 +37,7 @@ v0.1.x. Single-user. Breaking changes are likely. The [Goals doc](GOALS.md) (Pha
 # Build (default: no agent runner, no swarm dep needed)
 cargo build --release
 
-# Local survey
+# Local survey (creates mercator.db + mercator_map.json)
 cargo run -- survey ~/Desktop/code
 
 # With remote sources
@@ -30,21 +49,39 @@ cargo run -- survey ~/Desktop/code --obsidian ~/Desktop/brain
 # Watch mode — re-survey every N minutes
 cargo run -- survey ~/Desktop/code --watch 5
 
-# Dashboard
+# Dashboard (reads from mercator.db; falls back to map.json on DB error)
 cargo run -- serve --port 3000
+
+# CLI list / search (closes the loop on #25)
+cargo run -- list --type Git
+cargo run -- list --tech Rust
+cargo run -- search 'cli-tool'
 ```
+
+The `-d/--db` flag is on every subcommand and defaults to `mercator.db`.
 
 ## Architecture
 
 ```
 mercator/
-├── src/main.rs              # CLI + Axum server + survey + UI handlers (~2k lines, see #11)
-├── dist/index.html          # Single-file dashboard (~1.7k lines)
-├── .github/workflows/ci.yml # rustfmt + clippy + test, gates PRs to master
-├── Cargo.toml               # `swarm` feature is opt-in; default build skips agent runner
-├── Dockerfile               # alpine + musl; serves on 0.0.0.0 (see #6)
-├── mercator_map.json        # generated; the entire map lives here as JSON (see #24)
-└── mercator_purged.json     # generated; sticky purge blocklist
+├── src/
+│   ├── main.rs           # CLI parsing, HTTP handlers, AppState, route registration
+│   ├── db.rs             # SQLite schema, migrations, CRUD, FTS5 search/list
+│   ├── project.rs        # `Project` struct + JSON load/save (legacy snapshot)
+│   ├── sources.rs        # FS survey, GitHub/GitLab fetchers, Obsidian, dedup, Source trait
+│   ├── markdown.rs       # description extraction, frontmatter, export rendering
+│   ├── tags_graph.rs     # auto-tagging + D3 graph computation
+│   ├── skills.rs         # skills inventory walker
+│   └── agent.rs          # swarm-feature agent runner (cfg-gated)
+├── dist/index.html       # single-file dashboard (~1.8k lines)
+├── docs/
+│   ├── STATUS.md         # current state + roadmap
+│   └── decisions/        # ADRs
+├── .github/workflows/ci.yml
+├── Cargo.toml            # `swarm` feature flag (path-dep added manually)
+├── Dockerfile            # alpine + musl
+├── mercator.db           # generated; SQLite source of truth
+└── mercator_map.json     # generated; legacy snapshot, fallback only
 ```
 
 ### Tech stack
@@ -52,8 +89,10 @@ mercator/
 - **Rust** 2021 edition, Tokio async runtime
 - **Axum 0.8** for HTTP
 - **Clap 4** (derive) for CLI
+- **rusqlite 0.32** with `bundled` feature — SQLite + FTS5, no system dep
 - **Reqwest** for GitHub/GitLab APIs
 - **Walkdir** for filesystem traversal
+- **chrono** for timestamps (used carefully — see [ADR 0001](docs/decisions/0001-sqlite-staged-migration.md) for the `%f` format gotcha)
 - **Tailwind (CDN) + JetBrains Mono** in the dashboard
 - **D3 v7** for the graph view
 - **marked.js** for in-app markdown rendering
@@ -67,7 +106,7 @@ cargo fmt
 # Lint (CI runs this with -D warnings)
 cargo clippy --all-targets --no-deps -- -D warnings
 
-# Test
+# Test (97 tests as of 2026-05-04)
 cargo test
 
 # Local-only: enable the in-dashboard agent runner
@@ -85,7 +124,7 @@ cargo build --features swarm
 2. **clippy** — `cargo clippy --all-targets --no-deps -- -D warnings`
 3. **build & test** — `cargo build && cargo test`
 
-All three must be green before merge (configure branch protection in repo Settings).
+All three must be green before merge.
 
 ## Code style
 
@@ -94,37 +133,32 @@ All three must be green before merge (configure branch protection in repo Settin
 - Async fns live in handler functions, not in module roots
 - Every struct that crosses the JSON boundary derives `Serialize` / `Deserialize`
 - Path-traversal-sensitive endpoints (`/api/project/file`) canonicalize both root and target before comparison
+- **Tests before code, especially for refactors.** See [ADR 0004](docs/decisions/0004-tdd-discipline.md). Two real bugs were caught this way; the discipline pays for itself fast.
 
-## Project structure note
+## Adding a module
 
-`src/main.rs` currently holds CLI parsing, FS walking, git shelling, HTTP fetching, frontmatter parsing, dedup logic, graph computation, agent orchestration (gated), skills inventory, and all route handlers. Splitting it is tracked in [#11](https://github.com/zot24/mercator/issues/11). Don't grow it; new domains belong in their own future modules.
+`main.rs` was a 3604-line monolith before [#11](https://github.com/zot24/mercator/issues/11) split it. The split landed in waves; the structure now is the seven modules above. Don't grow `main.rs`. New domains belong in their own module — model the existing ones (`project.rs`, `sources.rs`, `db.rs`) for the convention:
 
-## What's missing
-
-The README's Roadmap section enumerates promises that don't ship yet. The [project board](https://github.com/users/zot24/projects/12) is grouped by phase:
-
-- **P0 — Cross-cutting** (must ship before P1): docs sync, distribution, security/auth, tests
-- **P1 — Make it real**: SQLite + FTS5, `mercator list`/`search`/`export`, provider trait, multi-path
-- **P2 — Make it smart**: deploy integrations, semantic graph, cost visibility, LLM-wiki layer
-- **P3 — Close the loop**: Swarm workflow templates, per-project guardrails, cross-project AI
-
-When in doubt, follow the order suggested in [#18](https://github.com/zot24/mercator/issues/18) and the project board.
+- One `//!` docstring at the top explaining what the module owns and what it doesn't.
+- `pub` only what's needed across module boundaries.
+- Tests in the same file under `#[cfg(test)] mod tests` (small modules) or in `src/main.rs::tests` (when the test pulls in too many other modules' helpers).
 
 ## Known sharp edges
 
-1. **`Cargo.toml` has no `swarm` dep declared by default.** Feature `swarm` is just a flag — adding `--features swarm` without manually adding the path dep will fail to build. This is intentional until [#21](https://github.com/zot24/mercator/issues/21) lands.
-2. **`mercator_map.json` is read on every API request and rewritten on every survey.** No locking. A `survey --watch` running alongside `serve` can cause partial reads ([#10](https://github.com/zot24/mercator/issues/10)) — handler self-heals to `[]` on parse failure but mutating endpoints can clobber. Resolved by [#24](https://github.com/zot24/mercator/issues/24).
-3. **GitHub / GitLab fetches fail silently** on 4xx and rate limits ([#5](https://github.com/zot24/mercator/issues/5)). User sees an empty list.
-4. **Settings panel collects tokens in localStorage but the backend never reads them** ([#2](https://github.com/zot24/mercator/issues/2)). Tokens are dead UI today.
-5. **`osascript` Terminal launcher is macOS-only**. Closed as wontfix-for-now ([#17](https://github.com/zot24/mercator/issues/17)).
-6. **Dashboard runs at `0.0.0.0` in Docker with no auth** ([#6](https://github.com/zot24/mercator/issues/6)). Treat the binary as localhost-only until that lands.
+1. **`Cargo.toml` has no `swarm` dep declared by default.** Feature `swarm` is just a flag — adding `--features swarm` without manually adding the path dep will fail to build. Intentional until [#21](https://github.com/zot24/mercator/issues/21) lands.
+2. **GitHub / GitLab fetches surface errors via `eprintln!`** but don't propagate them as structured `SourceError` variants yet (the enum has only `Generic(String)`). Will be split when [#8](https://github.com/zot24/mercator/issues/8) needs to discriminate.
+3. **Settings panel collects tokens in localStorage but the backend never reads them** ([#2](https://github.com/zot24/mercator/issues/2)). Tokens are dead UI today.
+4. **`osascript` Terminal launcher is macOS-only**. Closed as wontfix-for-now ([#17](https://github.com/zot24/mercator/issues/17)).
+5. **Dashboard runs at `127.0.0.1` by default; Docker too**. Expose with `-b 0.0.0.0` *and* `MERCATOR_TOKEN`.
+6. **`agent_jobs` table is not in the schema yet.** Swarm-feature agent runner keeps state in process memory; restart loses the job list. Stage 5 of the SQLite work, not yet scheduled.
 
-## Why Rust / Axum / Walkdir
+## Why Rust / Axum / SQLite
 
 - **Rust** — single binary, fast startup, memory safe, async via Tokio. The dashboard tab opening in <1s matters for a tool you live in.
-- **Axum** — minimal, ergonomic, plays well with Tower middleware. The router is small enough that auth (#6) will slot in cleanly.
-- **Walkdir** — depth control + skip-current-dir is enough; no need for `notify`/`watch` until [`watch`](https://github.com/zot24/mercator/issues/15) becomes real-time.
+- **Axum** — minimal, ergonomic, plays well with Tower middleware. The `MERCATOR_TOKEN` middleware slotted in cleanly.
+- **rusqlite + FTS5** — the migration off `mercator_map.json` was the single biggest unblock for [#25](https://github.com/zot24/mercator/issues/25), [#1](https://github.com/zot24/mercator/issues/1), [#7](https://github.com/zot24/mercator/issues/7), [#10](https://github.com/zot24/mercator/issues/10), [#15](https://github.com/zot24/mercator/issues/15). FTS5 ships with SQLite, the `bundled` feature compiles SQLite into the binary so users don't need a system install. See [ADR 0002](docs/decisions/0002-fts5-default-mode-and-token-quoting.md).
+- **Walkdir** — depth control + skip-current-dir is enough; no need for `notify`/`watch` until [#15](https://github.com/zot24/mercator/issues/15) becomes real-time.
 
 ---
 
-*Last updated: 2026-05-03 — synced with the actual feature set as of commit master + #18.*
+*Last updated: 2026-05-04 — synced after the SQLite + FTS5 migration (#24) and the `mercator list` / `search` CLI (#25). See [docs/STATUS.md](docs/STATUS.md) for the live snapshot.*

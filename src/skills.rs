@@ -31,7 +31,7 @@ pub struct SkillEntry {
     pub description: String,
     /// Frontmatter `version` if present, otherwise plugin version from path
     pub version: Option<String>,
-    /// True if a global copy exists at ~/.claude/skills/<name>/
+    /// True if a global copy exists at `~/.claude/skills/<name>/`
     pub has_global: bool,
     pub global_hash: Option<u64>,
     pub global_path: Option<String>,
@@ -167,7 +167,7 @@ fn load_marketplace_repos(home: &Path) -> std::collections::HashMap<String, Stri
     map
 }
 
-/// Walk plugin cache: ~/.claude/plugins/cache/<marketplace>/<plugin>/<version>/skills/<skill>/SKILL.md
+/// Walk plugin cache: `~/.claude/plugins/cache/<marketplace>/<plugin>/<version>/skills/<skill>/SKILL.md`
 fn scan_plugin_skills(home: &Path) -> Vec<(String, String, SkillRead, PathBuf)> {
     let mut out = Vec::new();
     let cache_root = home.join(".claude/plugins/cache");
