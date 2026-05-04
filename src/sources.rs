@@ -782,3 +782,144 @@ pub fn link_obsidian_notes(projects: Vec<Project>) -> Vec<Project> {
     result.extend(obsidian_by_name.into_values());
     result
 }
+
+// ── Source trait + adapters (#9) ───────────────────────────────────────
+//
+// The `Source` trait is a plug-point for remote project sources. Adding a
+// new integration (Vercel / Supabase / Turso, see #8) means writing one
+// adapter struct + impl, then registering it in the survey loop. The
+// existing `fetch_github_repos` / `fetch_gitlab_repos` fns are kept as the
+// underlying implementations so today's behavior is byte-for-byte
+// preserved; the adapters are thin wrappers.
+//
+// `AnySource` is an enum-based dispatch that lets the survey loop hold a
+// heterogeneous collection without `Box<dyn Source>` (which would require
+// `async-trait` and erase the lifetime of returned futures). When deploy
+// integrations land, add a new variant + a new adapter and the survey
+// loop picks it up automatically.
+
+/// Error returned by `Source::fetch`. Today it carries through the existing
+/// composite string error from the underlying fetch — including
+/// `format_api_error`'s rate-limit and 401/403 hints — so user-visible
+/// stderr output is unchanged. Future variants will carry structured
+/// network / API / parse details as deploy integrations land.
+#[derive(Debug)]
+pub enum SourceError {
+    /// String error from the underlying fetch.
+    Generic(String),
+}
+
+impl std::fmt::Display for SourceError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SourceError::Generic(s) => f.write_str(s),
+        }
+    }
+}
+
+impl std::error::Error for SourceError {}
+
+impl From<String> for SourceError {
+    fn from(s: String) -> Self {
+        SourceError::Generic(s)
+    }
+}
+
+pub trait Source {
+    /// Short identifier used in log lines (e.g. "GitHub", "GitLab"). Stable
+    /// across versions; intended for `eprintln!`-style status output.
+    fn name(&self) -> &'static str;
+
+    /// Human-readable description used by the CLI's "Fetching {} ..." log
+    /// line. Per-source so each can include identity + auth context the
+    /// way it wants (GitHub mentions the 60/hr unauth cap; GitLab doesn't).
+    fn description(&self) -> String;
+
+    /// Fetch the source's projects. The returned `Vec<Project>` may be
+    /// empty (e.g. user has no public repos).
+    fn fetch(&self) -> impl std::future::Future<Output = Result<Vec<Project>, SourceError>> + Send;
+}
+
+pub struct GitHubSource {
+    pub username: String,
+    pub token: Option<String>,
+    pub max_repos: Option<usize>,
+}
+
+impl Source for GitHubSource {
+    fn name(&self) -> &'static str {
+        "GitHub"
+    }
+
+    fn description(&self) -> String {
+        let auth = if self.token.is_some() {
+            " (authenticated)"
+        } else {
+            " (unauthenticated, 60/hr cap)"
+        };
+        format!("GitHub repos for {}{}", self.username, auth)
+    }
+
+    async fn fetch(&self) -> Result<Vec<Project>, SourceError> {
+        fetch_github_repos(&self.username, self.token.as_deref(), self.max_repos)
+            .await
+            .map_err(SourceError::from)
+    }
+}
+
+pub struct GitLabSource {
+    pub username: String,
+    pub token: Option<String>,
+    pub max_repos: Option<usize>,
+}
+
+impl Source for GitLabSource {
+    fn name(&self) -> &'static str {
+        "GitLab"
+    }
+
+    fn description(&self) -> String {
+        let auth = if self.token.is_some() {
+            " (authenticated)"
+        } else {
+            " (unauthenticated)"
+        };
+        format!("GitLab repos for {}{}", self.username, auth)
+    }
+
+    async fn fetch(&self) -> Result<Vec<Project>, SourceError> {
+        fetch_gitlab_repos(&self.username, self.token.as_deref(), self.max_repos)
+            .await
+            .map_err(SourceError::from)
+    }
+}
+
+/// Enum-based dispatch over all remote source kinds. New deploy
+/// integrations (#8) add a variant here.
+pub enum AnySource {
+    GitHub(GitHubSource),
+    GitLab(GitLabSource),
+}
+
+impl AnySource {
+    pub fn name(&self) -> &'static str {
+        match self {
+            AnySource::GitHub(s) => s.name(),
+            AnySource::GitLab(s) => s.name(),
+        }
+    }
+
+    pub fn description(&self) -> String {
+        match self {
+            AnySource::GitHub(s) => s.description(),
+            AnySource::GitLab(s) => s.description(),
+        }
+    }
+
+    pub async fn fetch(&self) -> Result<Vec<Project>, SourceError> {
+        match self {
+            AnySource::GitHub(s) => s.fetch().await,
+            AnySource::GitLab(s) => s.fetch().await,
+        }
+    }
+}

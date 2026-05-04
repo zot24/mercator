@@ -15,8 +15,8 @@ use crate::agent::AgentJob;
 use crate::markdown::run_export;
 use crate::project::{format_time, load_map, save_map, Project, ProjectType};
 use crate::sources::{
-    deduplicate_projects, fetch_github_repos, fetch_gitlab_repos, link_obsidian_notes,
-    scan_obsidian_vault, survey_projects,
+    deduplicate_projects, link_obsidian_notes, scan_obsidian_vault, survey_projects, AnySource,
+    GitHubSource, GitLabSource,
 };
 use crate::tags_graph::{auto_tag_projects, compute_graph};
 
@@ -600,35 +600,30 @@ async fn main() {
                     all_projects.extend(found);
                 }
 
+                // Build the remote-source list. Adding a deploy integration
+                // (#8) means pushing one more `AnySource::*` variant here.
+                let mut remote_sources: Vec<AnySource> = Vec::new();
                 if let Some(gh_user) = &github {
-                    let auth_label = if github_token.is_some() {
-                        " (authenticated)"
-                    } else {
-                        " (unauthenticated, 60/hr cap)"
-                    };
-                    eprintln!("Fetching GitHub repos for {}{}...", gh_user, auth_label);
-                    match fetch_github_repos(gh_user, github_token.as_deref(), max_repos).await {
-                        Ok(gh_repos) => {
-                            eprintln!("  fetched {} GitHub repos", gh_repos.len());
-                            all_projects.extend(gh_repos);
-                        }
-                        Err(e) => {
-                            eprintln!("  ⚠  {}", e);
-                        }
-                    }
+                    remote_sources.push(AnySource::GitHub(GitHubSource {
+                        username: gh_user.clone(),
+                        token: github_token.clone(),
+                        max_repos,
+                    }));
+                }
+                if let Some(gl_user) = &gitlab {
+                    remote_sources.push(AnySource::GitLab(GitLabSource {
+                        username: gl_user.clone(),
+                        token: gitlab_token.clone(),
+                        max_repos,
+                    }));
                 }
 
-                if let Some(gl_user) = &gitlab {
-                    let auth_label = if gitlab_token.is_some() {
-                        " (authenticated)"
-                    } else {
-                        " (unauthenticated)"
-                    };
-                    eprintln!("Fetching GitLab repos for {}{}...", gl_user, auth_label);
-                    match fetch_gitlab_repos(gl_user, gitlab_token.as_deref(), max_repos).await {
-                        Ok(gl_repos) => {
-                            eprintln!("  fetched {} GitLab repos", gl_repos.len());
-                            all_projects.extend(gl_repos);
+                for source in &remote_sources {
+                    eprintln!("Fetching {}...", source.description());
+                    match source.fetch().await {
+                        Ok(repos) => {
+                            eprintln!("  fetched {} {} repos", repos.len(), source.name());
+                            all_projects.extend(repos);
                         }
                         Err(e) => {
                             eprintln!("  ⚠  {}", e);
@@ -1197,6 +1192,93 @@ mod tests {
     fn is_authorised_accepts_correct_bearer_token() {
         let h = hdrs_with_auth("Bearer secret");
         assert!(is_authorised(Some("secret"), &h));
+    }
+
+    // ── Source trait + SourceError (#9) ─────────────────────────────────
+
+    #[test]
+    fn source_error_display_passes_through_generic() {
+        let err = crate::sources::SourceError::Generic(
+            "GitHub API error 403: rate limit (rate limit: 0 remaining, resets in 42s) — set a token (issue #2) for authenticated quota".to_string(),
+        );
+        // Display is the format `eprintln!("  ⚠  {}", e)` would produce.
+        // Today's stderr output must be unchanged after the trait swap.
+        assert_eq!(
+            err.to_string(),
+            "GitHub API error 403: rate limit (rate limit: 0 remaining, resets in 42s) — set a token (issue #2) for authenticated quota"
+        );
+    }
+
+    #[test]
+    fn source_error_from_string_lifts_into_generic() {
+        let err: crate::sources::SourceError = "boom".to_string().into();
+        assert_eq!(err.to_string(), "boom");
+    }
+
+    #[test]
+    fn github_source_description_distinguishes_auth_state() {
+        use crate::sources::{GitHubSource, Source};
+        let auth = GitHubSource {
+            username: "alice".into(),
+            token: Some("ghp_xxx".into()),
+            max_repos: None,
+        };
+        assert_eq!(auth.name(), "GitHub");
+        assert_eq!(auth.description(), "GitHub repos for alice (authenticated)");
+
+        let unauth = GitHubSource {
+            username: "alice".into(),
+            token: None,
+            max_repos: None,
+        };
+        // Unauth GitHub explicitly mentions the 60/hr cap so users know
+        // why fetches throttle.
+        assert_eq!(
+            unauth.description(),
+            "GitHub repos for alice (unauthenticated, 60/hr cap)"
+        );
+    }
+
+    #[test]
+    fn gitlab_source_description_distinguishes_auth_state() {
+        use crate::sources::{GitLabSource, Source};
+        let auth = GitLabSource {
+            username: "bob".into(),
+            token: Some("glpat-xxx".into()),
+            max_repos: None,
+        };
+        assert_eq!(auth.name(), "GitLab");
+        assert_eq!(auth.description(), "GitLab repos for bob (authenticated)");
+
+        let unauth = GitLabSource {
+            username: "bob".into(),
+            token: None,
+            max_repos: None,
+        };
+        // GitLab unauth doesn't carry the same 60/hr signal as GitHub.
+        assert_eq!(
+            unauth.description(),
+            "GitLab repos for bob (unauthenticated)"
+        );
+    }
+
+    #[test]
+    fn any_source_dispatches_name_and_description() {
+        use crate::sources::{AnySource, GitHubSource, GitLabSource};
+        let gh = AnySource::GitHub(GitHubSource {
+            username: "alice".into(),
+            token: None,
+            max_repos: None,
+        });
+        let gl = AnySource::GitLab(GitLabSource {
+            username: "bob".into(),
+            token: Some("t".into()),
+            max_repos: None,
+        });
+        assert_eq!(gh.name(), "GitHub");
+        assert_eq!(gl.name(), "GitLab");
+        assert!(gh.description().starts_with("GitHub repos for alice"));
+        assert!(gl.description().starts_with("GitLab repos for bob"));
     }
 
     // ── format_api_error ───────────────────────────────────────────────
