@@ -201,8 +201,9 @@ mercator serve -m custom_map.json      # Custom map file
 | `-p, --port <port>` | Port to listen on (default: 3000) |
 | `-b, --bind <ip>` | Bind address (default: 127.0.0.1) |
 | `-m, --map-file <file>` | Path to map JSON (default: `mercator_map.json`) |
+| `--refresh <path>` | Local path the dashboard's refresh button re-scans. Repeat for multiple roots: `serve --refresh ~/code --refresh ~/oss`. Without this, the refresh button just reloads the page. |
 
-The serve command re-reads the JSON file on each request, so running `survey --watch` in the background keeps the dashboard fresh.
+The serve command re-reads the JSON file on each request, so running `survey --watch` in the background keeps the dashboard fresh. Alternatively, pass `--refresh <path>` to make the dashboard's refresh button re-scan in-process — quicker for ad-hoc local changes. Remote sources (GitHub/GitLab/Obsidian) are not re-fetched on refresh; use `mercator survey ...` for those.
 
 ## Docker
 

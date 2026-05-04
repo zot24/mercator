@@ -127,6 +127,14 @@ enum Commands {
         /// Path to the map JSON file
         #[arg(short, long, default_value = "mercator_map.json")]
         map_file: PathBuf,
+
+        /// Local paths to re-scan when the dashboard's refresh button is
+        /// clicked. Pass once per root: `--refresh ~/code --refresh ~/oss`.
+        /// When empty, the refresh button just reloads the page (legacy
+        /// behaviour). Remote sources (GitHub/GitLab/Obsidian) are not
+        /// re-fetched on refresh — run `mercator survey ...` for those.
+        #[arg(long)]
+        refresh: Vec<PathBuf>,
     },
 }
 
@@ -1054,6 +1062,9 @@ struct AppState {
     #[cfg(feature = "swarm")]
     task_handles: Arc<Mutex<std::collections::HashMap<String, tokio::task::JoinHandle<()>>>>,
     map_file: PathBuf,
+    /// Paths the dashboard's refresh button re-scans. Empty = refresh is a
+    /// no-op (button just reloads the page). Configured via `serve --refresh`.
+    refresh_paths: Vec<PathBuf>,
 }
 
 // ── Project Preview (file tree + viewer) ───────────────────────────────
@@ -1277,6 +1288,42 @@ async fn restore_project_api(
 }
 
 /// API endpoint: re-run auto-categorization against the existing map and save it
+/// Re-survey the configured local paths and rewrite the map. Remote sources
+/// (GitHub/GitLab/Obsidian) are intentionally NOT re-fetched here — the
+/// survey button is for "I just changed my filesystem". Use the `mercator
+/// survey` CLI for full coverage.
+async fn refresh_survey_api(State(state): State<AppState>) -> Json<serde_json::Value> {
+    if state.refresh_paths.is_empty() {
+        return Json(serde_json::json!({
+            "ok": false,
+            "error": "No refresh paths configured. Restart with `serve --refresh <path>` to enable.",
+        }));
+    }
+    let mut all = Vec::new();
+    let mut per_path = Vec::new();
+    for path in &state.refresh_paths {
+        let found = survey_projects(path);
+        per_path.push(serde_json::json!({
+            "path": path.to_string_lossy(),
+            "found": found.len(),
+        }));
+        all.extend(found);
+    }
+    // Honour the existing purge blocklist
+    let purged = read_purged(&state.map_file);
+    all.retain(|p| !purged.contains(p.path.trim_end_matches('/')));
+    let mut all = deduplicate_projects(all);
+    auto_tag_projects(&mut all);
+    if let Err(e) = save_map(&all, &state.map_file) {
+        return Json(serde_json::json!({ "ok": false, "error": e }));
+    }
+    Json(serde_json::json!({
+        "ok": true,
+        "total": all.len(),
+        "per_path": per_path,
+    }))
+}
+
 async fn recategorize_api(State(state): State<AppState>) -> Json<serde_json::Value> {
     let mut projects = match load_map(&state.map_file) {
         Ok(p) => p,
@@ -2193,6 +2240,7 @@ async fn main() {
             port,
             bind,
             map_file,
+            refresh,
         } => {
             // Read the map file on each request so browser refresh picks up changes
             let map_path = map_file.clone();
@@ -2226,6 +2274,7 @@ async fn main() {
                 #[cfg(feature = "swarm")]
                 task_handles: Arc::new(Mutex::new(std::collections::HashMap::new())),
                 map_file: map_file.clone(),
+                refresh_paths: refresh,
             };
 
             // /api/* routes are protected by an optional Bearer token
@@ -2238,6 +2287,7 @@ async fn main() {
                 .route("/api/open-terminal", post(open_terminal))
                 .route("/api/git-status", get(get_git_status_api))
                 .route("/api/categorize", post(recategorize_api))
+                .route("/api/survey/refresh", post(refresh_survey_api))
                 .route("/api/skills", get(skills_api))
                 .route("/api/project/purge", post(purge_project_api))
                 .route("/api/project/restore", post(restore_project_api))
