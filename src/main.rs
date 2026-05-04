@@ -1397,6 +1397,18 @@ mod tests {
         );
     }
 
+    #[test]
+    fn normalize_remote_url_handles_ssh_with_git_user() {
+        // Regression: classify-by-remote needs `ssh://git@host/path` to
+        // collapse the same as `git@host:path` and `https://host/path`.
+        // Pre-fix this returned `git@github.com/zot24/mercator`, which
+        // made the host check fail and projects misclassified as Git.
+        assert_eq!(
+            normalize_remote_url("ssh://git@github.com/zot24/mercator.git"),
+            "github.com/zot24/mercator"
+        );
+    }
+
     // ── normalize_name ─────────────────────────────────────────────────
 
     #[test]
@@ -1526,9 +1538,14 @@ mod tests {
 
     #[test]
     fn deduplicate_merges_local_with_matching_github() {
+        // Post-classify-by-remote (#63 follow-up): the local repo's
+        // project_type is now GitHub at survey time because its origin
+        // points to github.com. Dedup still keeps "local wins" — the
+        // merged result is a single GitHub-typed project enriched with
+        // the remote's description and tech_stack.
         let local = project(
             "mercator",
-            ProjectType::Git,
+            ProjectType::GitHub,
             Some("git@github.com:zot24/mercator.git"),
         );
         let mut remote = project(
@@ -1541,7 +1558,7 @@ mod tests {
 
         let merged = deduplicate_projects(vec![local, remote]);
         assert_eq!(merged.len(), 1);
-        assert!(matches!(merged[0].project_type, ProjectType::Git));
+        assert!(matches!(merged[0].project_type, ProjectType::GitHub));
         assert_eq!(
             merged[0].description,
             "Cartography for your local landscape"
@@ -2090,6 +2107,80 @@ mod tests {
     fn detect_agent_returns_none_for_plain_dir() {
         let dir = tempfile::tempdir().unwrap();
         assert!(detect_agent(dir.path()).is_none());
+    }
+
+    // ── classify_git_project_type ──────────────────────────────────────
+
+    #[test]
+    fn classify_git_project_type_handles_no_remote() {
+        use crate::sources::classify_git_project_type;
+        assert!(matches!(classify_git_project_type(None), ProjectType::Git));
+        assert!(
+            matches!(classify_git_project_type(Some("")), ProjectType::Git),
+            "empty string is not a remote"
+        );
+    }
+
+    #[test]
+    fn classify_git_project_type_recognizes_github() {
+        use crate::sources::classify_git_project_type;
+        for url in [
+            "https://github.com/zot24/mercator",
+            "https://github.com/zot24/mercator.git",
+            "git@github.com:zot24/mercator.git",
+            "ssh://git@github.com/zot24/mercator.git",
+            "https://GitHub.com/zot24/mercator", // case-insensitive
+        ] {
+            assert!(
+                matches!(classify_git_project_type(Some(url)), ProjectType::GitHub),
+                "expected GitHub for {url}"
+            );
+        }
+    }
+
+    #[test]
+    fn classify_git_project_type_recognizes_gitlab() {
+        use crate::sources::classify_git_project_type;
+        for url in [
+            "https://gitlab.com/user/repo",
+            "git@gitlab.com:user/repo.git",
+            "https://gitlab.example.com/user/repo", // self-hosted
+            "https://gitlab.internal.work/team/repo",
+        ] {
+            assert!(
+                matches!(classify_git_project_type(Some(url)), ProjectType::GitLab),
+                "expected GitLab for {url}"
+            );
+        }
+    }
+
+    #[test]
+    fn classify_git_project_type_falls_back_to_git_for_other_hosts() {
+        use crate::sources::classify_git_project_type;
+        for url in [
+            "https://bitbucket.org/x/y",
+            "https://codeberg.org/x/y",
+            "git@gitea.example.com:x/y.git",
+            "https://git.sr.ht/~user/repo",
+            // A URL whose path mentions "gitlab" but whose host doesn't —
+            // false-positive guard.
+            "https://github.com/x/my-gitlab-mirror",
+        ] {
+            let got = classify_git_project_type(Some(url));
+            // The github.com one is still GitHub; the others are Git.
+            if url.contains("github.com") {
+                assert!(
+                    matches!(got, ProjectType::GitHub),
+                    "expected GitHub for {url}"
+                );
+            } else {
+                assert!(
+                    matches!(got, ProjectType::Git),
+                    "expected Git for {url}, got {:?}",
+                    got
+                );
+            }
+        }
     }
 
     // ── survey_projects (FS) ───────────────────────────────────────────

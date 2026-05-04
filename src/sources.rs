@@ -446,15 +446,16 @@ pub fn survey_projects(root: &Path) -> Vec<Project> {
                 };
 
                 let agent_used = detect_agent(path);
+                let project_type = if is_git {
+                    classify_git_project_type(remote_url.as_deref())
+                } else {
+                    ProjectType::Idea
+                };
                 projects.push(Project {
                     name,
                     path: path.to_string_lossy().into_owned(),
                     description,
-                    project_type: if is_git {
-                        ProjectType::Git
-                    } else {
-                        ProjectType::Idea
-                    },
+                    project_type,
                     last_modified,
                     git_branch,
                     last_commit,
@@ -494,21 +495,53 @@ pub fn survey_projects(root: &Path) -> Vec<Project> {
 // ── Dedup ──────────────────────────────────────────────────────────────
 
 /// Normalize a remote URL for comparison (strip .git suffix, protocol, trailing slashes)
+/// Pick the right `ProjectType` for a local Git repo based on its
+/// `origin` remote.
+///
+/// - `origin` on GitHub → `ProjectType::GitHub`
+/// - `origin` on GitLab (incl. self-hosted instances whose host starts
+///   with `gitlab.` or contains `.gitlab.`) → `ProjectType::GitLab`
+/// - no remote at all, or a remote on some other host (Bitbucket,
+///   Codeberg, work-internal Gitea, …) → `ProjectType::Git`
+///
+/// This is what makes the dashboard's GITHUB / GITLAB sidebar filters
+/// honest — a local clone of a GitHub repo classifies as GitHub even
+/// before any `--github` fetch runs, and the GIT filter ends up holding
+/// only the truly upstream-less or non-mainstream-host repos.
+pub fn classify_git_project_type(remote_url: Option<&str>) -> ProjectType {
+    let Some(url) = remote_url.filter(|s| !s.is_empty()) else {
+        return ProjectType::Git;
+    };
+    let normalized = normalize_remote_url(url);
+    let host = normalized.split('/').next().unwrap_or("");
+    if host == "github.com" || host.ends_with(".github.com") {
+        ProjectType::GitHub
+    } else if host == "gitlab.com" || host.starts_with("gitlab.") || host.contains(".gitlab.") {
+        ProjectType::GitLab
+    } else {
+        ProjectType::Git
+    }
+}
+
 pub fn normalize_remote_url(url: &str) -> String {
     let mut url = url.trim().trim_end_matches('/').to_string();
     if url.ends_with(".git") {
         url.truncate(url.len() - 4);
     }
-    // Convert SSH git@host:user/repo to host/user/repo
-    if url.starts_with("git@") {
-        url = url.strip_prefix("git@").unwrap().replacen(':', "/", 1);
-    }
-    // Remove protocol prefix
+    // Strip protocol prefix first so the `ssh://git@host/...` form has
+    // its `git@` exposed for the next step. Doing this in the other
+    // order would leave `git@host` as the result.
     for prefix in &["https://", "http://", "ssh://"] {
         if let Some(rest) = url.strip_prefix(prefix) {
             url = rest.to_string();
             break;
         }
+    }
+    // Strip user info (`git@`) and convert the SCP-style separator
+    // colon (`git@host:user/repo`) to a slash so all forms collapse to
+    // `host/user/repo`.
+    if let Some(rest) = url.strip_prefix("git@") {
+        url = rest.replacen(':', "/", 1);
     }
     url.to_lowercase()
 }
