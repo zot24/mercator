@@ -163,6 +163,27 @@ mercator survey ~/code --github zot24 -w 5                # Re-scan every 5 minu
 | `-o, --output <file>` | Output JSON file (default: `mercator_map.json`) |
 | `-w, --watch <minutes>` | Re-scan every N minutes (keeps running) |
 
+### `mercator export <out_dir>`
+
+Write one markdown file per project. The output is a folder of structured notes that any other tool (Obsidian, Logseq, grep, ripgrep, an LLM) can consume directly.
+
+```bash
+mercator export ./notes                                         # → ./notes/<project>.md
+mercator export --obsidian-vault ~/Desktop/brain                # → ~/Desktop/brain/Projects/<project>.md
+mercator export --obsidian-vault ~/Desktop/brain \
+  --obsidian-folder Mercator                                    # custom subdir
+mercator export ./notes -m custom_map.json                      # use a different map
+```
+
+Each note has YAML frontmatter (`name`, `type`, `path`, `branch`, `status`, `last_modified`, `remote`, `agent`, `tech`, `tags`, `obsidian`) plus a body with status, links, and a tag/stack footer. Filenames are sanitised; collisions append ` (N)`.
+
+| Flag | Description |
+|------|-------------|
+| `<out_dir>` | Output directory (default: `./mercator-export`). Created if missing. |
+| `-m, --map-file <file>` | Source map JSON (default: `mercator_map.json`) |
+| `--obsidian-vault <path>` | Write under `<vault>/<folder>/` instead of `out_dir` |
+| `--obsidian-folder <name>` | Subdirectory inside the vault (default: `Projects`) |
+
 ### `mercator serve`
 
 Start the web dashboard.
@@ -236,7 +257,7 @@ The promises in *Why Mercator?* that don't ship today live as tracked issues. Th
 - **"Cuts the context-switch tax"** — file-tree explorer ships with smart auto-open: dirty repos open the most-recently-modified uncommitted file; clean repos open the freshest file under `src/`/`app/`/`lib/`; README is the fallback. Header banner shows branch, last commit, and days-since-modified.
 - **"Catches silent decay"** — dirty repos and stale (≥21 days idle) surface today, plus a `ROTTING` filter for the rare project that's both. Deploy / quota decay is gated on [#8](https://github.com/zot24/mercator/issues/8)
 - **"Tells me where to point AI"** — single-project agent launch works (with `--features swarm`); **cross-project landscape questioning** is [#20](https://github.com/zot24/mercator/issues/20)
-- **"Doesn't trap my data"** — **markdown export doesn't exist yet** ([#1](https://github.com/zot24/mercator/issues/1))
+- **"Doesn't trap my data"** — `mercator export` writes one markdown file per project with frontmatter + body; `--obsidian-vault` mode targets the Obsidian wiki layer.
 
 Everything else is in the [project board](https://github.com/users/zot24/projects/12), grouped by phase.
 

@@ -85,6 +85,26 @@ enum Commands {
         #[arg(long)]
         obsidian_sync: bool,
     },
+    /// Export the map as one markdown file per project (one folder of
+    /// structured notes that any other tool can consume)
+    Export {
+        /// Output directory (created if missing). Defaults to `./mercator-export`.
+        #[arg(default_value = "mercator-export")]
+        out_dir: PathBuf,
+
+        /// Source map JSON to read from
+        #[arg(short, long, default_value = "mercator_map.json")]
+        map_file: PathBuf,
+
+        /// When set, write under `<vault>/<folder>/` instead of `out_dir`.
+        /// Feed the Obsidian LLM-wiki layer (issue #22).
+        #[arg(long)]
+        obsidian_vault: Option<PathBuf>,
+
+        /// Subdirectory inside the Obsidian vault (default: "Projects")
+        #[arg(long, default_value = "Projects")]
+        obsidian_folder: String,
+    },
     /// Start the visualization server
     Serve {
         /// Port to listen on
@@ -727,6 +747,194 @@ fn deduplicate_projects(projects: Vec<Project>) -> Vec<Project> {
     result.extend(remote_by_url.into_values());
 
     result
+}
+
+/// Sanitize a project name into a safe filename. Strips/replaces filesystem
+/// hostile characters; collapses repeated separators; never returns an empty
+/// string. Pure function, unit-tested.
+fn sanitize_filename(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    for c in name.chars() {
+        match c {
+            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' | '\0' => out.push('-'),
+            c if c.is_control() => {}
+            c => out.push(c),
+        }
+    }
+    let trimmed = out.trim_matches(|c: char| c == '.' || c.is_whitespace());
+    let collapsed: String = trimmed
+        .chars()
+        .scan(' ', |prev, c| {
+            let keep = !(c == '-' && *prev == '-');
+            *prev = c;
+            Some((keep, c))
+        })
+        .filter(|(k, _)| *k)
+        .map(|(_, c)| c)
+        .collect();
+    if collapsed.is_empty() {
+        "untitled".to_string()
+    } else {
+        collapsed
+    }
+}
+
+/// Render a Project as a markdown note with YAML frontmatter. Pure function
+/// so it can be unit-tested without the filesystem.
+fn render_project_markdown(p: &Project) -> String {
+    let mut out = String::new();
+    out.push_str("---\n");
+    out.push_str(&format!("name: {}\n", yaml_escape(&p.name)));
+    out.push_str(&format!("type: {:?}\n", p.project_type));
+    out.push_str(&format!("path: {}\n", yaml_escape(&p.path)));
+    if let Some(branch) = &p.git_branch {
+        out.push_str(&format!("branch: {}\n", yaml_escape(branch)));
+    }
+    if let Some(status) = &p.git_status {
+        out.push_str(&format!("status: {}\n", status));
+    }
+    if let Some(lm) = &p.last_modified {
+        out.push_str(&format!("last_modified: {}\n", lm));
+    }
+    if let Some(remote) = &p.remote_url {
+        out.push_str(&format!("remote: {}\n", yaml_escape(remote)));
+    }
+    if let Some(agent) = &p.agent_used {
+        out.push_str(&format!("agent: {}\n", agent));
+    }
+    if !p.tech_stack.is_empty() {
+        out.push_str(&format!(
+            "tech: [{}]\n",
+            p.tech_stack
+                .iter()
+                .map(|s| yaml_inline_string(s))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    if !p.tags.is_empty() {
+        out.push_str(&format!(
+            "tags: [{}]\n",
+            p.tags
+                .iter()
+                .map(|s| yaml_inline_string(s))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    if let Some(obs) = &p.obsidian_url {
+        out.push_str(&format!("obsidian: {}\n", yaml_escape(obs)));
+    }
+    out.push_str("---\n\n");
+
+    out.push_str(&format!("# {}\n\n", p.name));
+
+    if !p.description.is_empty() && p.description != "No description provided." {
+        out.push_str(&p.description);
+        out.push_str("\n\n");
+    }
+
+    // Status section
+    let mut status_lines = Vec::new();
+    if let Some(b) = &p.git_branch {
+        status_lines.push(format!("- **Branch**: `{}`", b));
+    }
+    if let Some(c) = &p.last_commit {
+        status_lines.push(format!("- **Last commit**: {}", c));
+    }
+    if let Some(lm) = &p.last_modified {
+        status_lines.push(format!("- **Last modified**: {}", lm));
+    }
+    if p.git_status.as_deref() == Some("uncommitted") {
+        status_lines.push("- **Status**: dirty (uncommitted changes)".to_string());
+    }
+    if !status_lines.is_empty() {
+        out.push_str("## Status\n\n");
+        out.push_str(&status_lines.join("\n"));
+        out.push_str("\n\n");
+    }
+
+    // Links — only durable URLs. The local path lives in frontmatter for
+    // tooling; we don't add machine-specific `vscode://` links to a portable
+    // markdown file.
+    let mut links = Vec::new();
+    if let Some(url) = &p.remote_url {
+        links.push(format!("- [Remote]({})", url));
+    }
+    if let Some(obs) = &p.obsidian_url {
+        links.push(format!("- [Obsidian note]({})", obs));
+    }
+    if !links.is_empty() {
+        out.push_str("## Links\n\n");
+        out.push_str(&links.join("\n"));
+        out.push_str("\n\n");
+    }
+
+    // Tags + tech as a footer line
+    if !p.tags.is_empty() || !p.tech_stack.is_empty() {
+        out.push_str("---\n");
+        if !p.tags.is_empty() {
+            let s: Vec<String> = p.tags.iter().map(|t| format!("#{}", t)).collect();
+            out.push_str(&format!("Tags: {}\n", s.join(" ")));
+        }
+        if !p.tech_stack.is_empty() {
+            out.push_str(&format!("Stack: {}\n", p.tech_stack.join(", ")));
+        }
+    }
+
+    out
+}
+
+/// Quote a string for a YAML scalar value if it contains special chars
+fn yaml_escape(s: &str) -> String {
+    let needs_quote = s.is_empty()
+        || s.contains([':', '#', '"', '\'', '\n', '[', ']', '{', '}'])
+        || s.starts_with(' ')
+        || s.ends_with(' ')
+        || s.starts_with('-');
+    if needs_quote {
+        format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+    } else {
+        s.to_string()
+    }
+}
+
+/// Quote a string for use inside a YAML inline list `[a, b, "c d"]`
+fn yaml_inline_string(s: &str) -> String {
+    if s.contains(',') || s.contains('"') || s.contains('[') || s.contains(']') {
+        format!("\"{}\"", s.replace('"', "\\\""))
+    } else {
+        s.to_string()
+    }
+}
+
+/// Run the export command. Pure-ish (touches the filesystem); returns counts.
+fn run_export(projects: &[Project], out_dir: &Path) -> Result<(usize, usize), String> {
+    std::fs::create_dir_all(out_dir)
+        .map_err(|e| format!("Cannot create {}: {}", out_dir.display(), e))?;
+    let mut written = 0usize;
+    let mut errors = 0usize;
+    let mut seen_names: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for p in projects {
+        let base = sanitize_filename(&p.name);
+        // Disambiguate collisions by appending a counter
+        let count = seen_names.entry(base.clone()).or_insert(0);
+        let filename = if *count == 0 {
+            format!("{}.md", base)
+        } else {
+            format!("{} ({}).md", base, count)
+        };
+        *count += 1;
+        let target = out_dir.join(&filename);
+        let body = render_project_markdown(p);
+        if let Err(e) = std::fs::write(&target, body) {
+            eprintln!("  ⚠  failed to write {}: {}", target.display(), e);
+            errors += 1;
+        } else {
+            written += 1;
+        }
+    }
+    Ok((written, errors))
 }
 
 fn save_map(projects: &[Project], output: &Path) -> Result<(), String> {
@@ -2729,6 +2937,43 @@ async fn main() {
                 }
             }
         }
+        Commands::Export {
+            out_dir,
+            map_file,
+            obsidian_vault,
+            obsidian_folder,
+        } => {
+            let projects = match load_map(&map_file) {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("Error: {}", e);
+                    std::process::exit(1);
+                }
+            };
+            let target = if let Some(vault) = &obsidian_vault {
+                vault.join(&obsidian_folder)
+            } else {
+                out_dir
+            };
+            eprintln!(
+                "Exporting {} projects to {}...",
+                projects.len(),
+                target.display()
+            );
+            match run_export(&projects, &target) {
+                Ok((written, errors)) => {
+                    println!("Wrote {} markdown files to {}", written, target.display());
+                    if errors > 0 {
+                        eprintln!("⚠  {} files failed to write", errors);
+                        std::process::exit(2);
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Error: {}", e);
+                    std::process::exit(1);
+                }
+            }
+        }
         Commands::Serve {
             port,
             bind,
@@ -3267,5 +3512,82 @@ mod tests {
     fn parse_git_status_path_returns_none_for_empty() {
         assert_eq!(parse_git_status_path(""), None);
         assert_eq!(parse_git_status_path("  "), None);
+    }
+
+    // ── sanitize_filename ──────────────────────────────────────────────
+
+    #[test]
+    fn sanitize_filename_replaces_filesystem_hostile_chars() {
+        assert_eq!(sanitize_filename("my/repo:name"), "my-repo-name");
+        assert_eq!(sanitize_filename("a*b?c|d"), "a-b-c-d");
+    }
+
+    #[test]
+    fn sanitize_filename_collapses_repeated_dashes() {
+        assert_eq!(sanitize_filename("a//b"), "a-b");
+        assert_eq!(sanitize_filename("x///y"), "x-y");
+    }
+
+    #[test]
+    fn sanitize_filename_falls_back_to_untitled_for_empty() {
+        assert_eq!(sanitize_filename(""), "untitled");
+        assert_eq!(sanitize_filename("...   "), "untitled");
+    }
+
+    #[test]
+    fn sanitize_filename_preserves_normal_names() {
+        assert_eq!(sanitize_filename("mercator"), "mercator");
+        assert_eq!(sanitize_filename("My Cool Project"), "My Cool Project");
+    }
+
+    // ── yaml_escape ────────────────────────────────────────────────────
+
+    #[test]
+    fn yaml_escape_quotes_when_needed() {
+        assert_eq!(yaml_escape("simple"), "simple");
+        assert_eq!(yaml_escape("has: colon"), "\"has: colon\"");
+        assert_eq!(yaml_escape("- starts dash"), "\"- starts dash\"");
+        assert_eq!(yaml_escape(""), "\"\"");
+    }
+
+    #[test]
+    fn yaml_escape_handles_quotes_in_value() {
+        assert_eq!(yaml_escape("a\"b"), "\"a\\\"b\"");
+    }
+
+    // ── render_project_markdown ────────────────────────────────────────
+
+    #[test]
+    fn render_project_markdown_includes_frontmatter_and_heading() {
+        let mut p = project(
+            "mercator",
+            ProjectType::Git,
+            Some("https://github.com/zot24/mercator"),
+        );
+        p.description = "Cartography for your local landscape".to_string();
+        p.git_branch = Some("master".to_string());
+        p.tech_stack = vec!["Rust".to_string()];
+        p.tags = vec!["cli".to_string(), "docs".to_string()];
+
+        let md = render_project_markdown(&p);
+        assert!(md.starts_with("---\n"));
+        assert!(md.contains("name: mercator"));
+        assert!(md.contains("type: Git"));
+        assert!(md.contains("branch: master"));
+        assert!(md.contains("# mercator"));
+        assert!(md.contains("Cartography for your local landscape"));
+        assert!(md.contains("- **Branch**: `master`"));
+        assert!(md.contains("[Remote](https://github.com/zot24/mercator)"));
+        assert!(md.contains("Tags: #cli #docs"));
+        assert!(md.contains("Stack: Rust"));
+    }
+
+    #[test]
+    fn render_project_markdown_omits_empty_sections() {
+        let p = project("bare", ProjectType::Folder, None);
+        let md = render_project_markdown(&p);
+        assert!(!md.contains("## Status"));
+        assert!(!md.contains("## Links"));
+        assert!(md.contains("# bare"));
     }
 }
