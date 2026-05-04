@@ -1,5 +1,31 @@
-// Mercator - Project Topography Tool
-// A Rust CLI tool for discovering and visualizing your local development projects
+//! Mercator — CLI parsing, HTTP handlers, and the wiring between them.
+//!
+//! What lives here, what doesn't:
+//!
+//! - **CLI**: `clap`-derived `Cli` / `Commands` enums + the per-subcommand
+//!   match arms in `main()`. Subcommands today: `survey`, `serve`,
+//!   `export`, `list`, `search`.
+//! - **HTTP**: `Axum` route registration, `AppState` (holds the live
+//!   `rusqlite::Connection` behind a `tokio::sync::Mutex`), the
+//!   `MERCATOR_TOKEN` middleware, and every `/api/*` handler.
+//! - **Glue**: opens the DB once at startup (Survey + Serve), runs the
+//!   one-shot JSON-to-SQLite import, hands the connection to the route
+//!   handlers via `State<AppState>`.
+//!
+//! Domain logic lives in dedicated modules — see them for what they own:
+//!
+//! - [`db`] — SQLite schema, migrations, CRUD, FTS5 search/list
+//! - [`project`] — `Project` struct + JSON load/save (legacy snapshot path)
+//! - [`sources`] — local FS survey, GitHub/GitLab fetchers, Obsidian, dedup, `Source` trait
+//! - [`markdown`] — description extraction, frontmatter, export rendering
+//! - [`tags_graph`] — auto-tagging + D3 graph computation
+//! - [`skills`] — skills inventory walker
+//! - `agent` — swarm-feature agent runner (cfg-gated; intra-doc link
+//!   omitted because the module is conditional on `--features swarm`)
+//!
+//! See [`docs/STATUS.md`](../../docs/STATUS.md) for the live snapshot of
+//! state and roadmap, and [`CLAUDE.md`](../../CLAUDE.md) for the
+//! operator's manual.
 
 #[cfg(feature = "swarm")]
 mod agent;

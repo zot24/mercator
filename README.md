@@ -4,7 +4,7 @@
 
 Mercator is a Rust CLI tool and web dashboard that discovers, organizes, and visualizes all your development projects in one place. It scans local directories, GitHub, GitLab, and an Obsidian vault to build a map of your project landscape.
 
-**Status: v0.1.x — early, single-user, breaking changes likely.** What ships today is local + GitHub + GitLab + Obsidian aggregation, an in-app explorer with file tree and README rendering, auto-tagging, a graph view, a skills inventory, project purge, and an opt-in Claude Code agent runner. What's described in *Why Mercator?* below as detecting deploy decay or exporting to markdown is **roadmap, not yet shipped** — see the [project board](https://github.com/users/zot24/projects/12) and [open issues](https://github.com/zot24/mercator/issues) for what's queued.
+**Status: v0.1.x — early, single-user, breaking changes likely.** What ships today is local + GitHub + GitLab + Obsidian aggregation backed by SQLite + FTS5, an in-app explorer with file tree and README rendering, auto-tagging, a graph view, a skills inventory, project purge, `mercator list` / `mercator search` / `mercator export` CLI subcommands, and an opt-in Claude Code agent runner. What's described in *Why Mercator?* below as detecting deploy decay or cross-project AI is **roadmap, not yet shipped** — see [docs/STATUS.md](docs/STATUS.md) for the precise live state and the [project board](https://github.com/users/zot24/projects/12) for what's queued.
 
 ## Why Mercator?
 
@@ -81,6 +81,11 @@ the day it makes your existing project sprawl manageable.
 
 ## What ships today
 
+**Persistence**
+- SQLite + FTS5 source of truth (`mercator.db`); the legacy `mercator_map.json` is still written as a backup snapshot but no longer the source of truth
+- Auto-import migration from `mercator_map.json` + `mercator_purged.json` if you're upgrading from v0.1.x JSON-only — runs once on first start, idempotent
+- Per-row sync from survey through to FTS5 index, atomic-tx purges, foreign-key cascades
+
 **Discovery**
 - Local project scanning — Git repos, `IDEA.md` folders, top-level directories
 - Git metadata — branch, last commit, dirty/uncommitted-files detection (click the warning to see changed files)
@@ -89,6 +94,12 @@ the day it makes your existing project sprawl manageable.
 - Obsidian vault scan — pulls `Projects/` notes and the `@Projects.md` idea list, links them to matching repos by name
 - AI agent detection — identifies projects using Claude Code (`CLAUDE.md`, `.claude/`) or Codex (`AGENTS.md`, `.codex/`)
 - Deduplication — local Git repos merge with their GitHub/GitLab counterparts via remote URL or fallback name match
+- Pluggable source trait — adding new providers (Vercel/Supabase/Turso, in flight) is one struct + one `impl Source`; no fork of the survey loop
+
+**CLI access**
+- `mercator list [--type T] [--tag T] [--tech T]` — filter projects, tab-separated stdout for piping to `awk`/`cut`/`grep`
+- `mercator search <query>` — full-text search via SQLite FTS5 (name + description + tags), AND across whitespace tokens, hyphens-in-words are literal
+- `mercator export <out_dir>` — one markdown file per project, suitable for an Obsidian wiki or any other consumer
 
 **Organisation**
 - Auto-tagging into 15 categories (`ai`, `web`, `api`, `cli`, `devops`, `mobile`, `data`, `blockchain`, `seo`, `auth`, `bot`, `automation`, `game`, `docs`, `finance`)
@@ -140,7 +151,7 @@ cargo build --release
 
 ### `mercator survey <path>`
 
-Scan a directory for projects and write results to JSON.
+Scan a directory for projects, upsert the result into SQLite, and write a JSON snapshot for backup.
 
 ```bash
 mercator survey ~/code                                    # Local only
@@ -152,6 +163,7 @@ GITHUB_TOKEN=ghp_xxx mercator survey ~/code --github zot24  # Same via env
 mercator survey ~/code --gitlab myuser                    # + GitLab repos
 mercator survey ~/code --github zot24 --max-repos 1000    # Cap fetched repos
 mercator survey ~/code --github zot24 -w 5                # Re-scan every 5 minutes
+mercator survey ~/code -d ~/.mercator/main.db             # Custom DB path
 ```
 
 | Flag | Description |
@@ -161,19 +173,53 @@ mercator survey ~/code --github zot24 -w 5                # Re-scan every 5 minu
 | `--gitlab <user>` | Fetch repos from GitLab |
 | `--gitlab-token <token>` | GitLab PAT (also reads `GITLAB_TOKEN` env) |
 | `--max-repos <n>` | Cap the number of repos fetched per remote source (default: no cap, paginates until done) |
-| `-o, --output <file>` | Output JSON file (default: `mercator_map.json`) |
+| `-o, --output <file>` | Output JSON snapshot (default: `mercator_map.json`). Snapshot only — the DB is the source of truth. |
+| `-d, --db <file>` | SQLite DB file (default: `mercator.db`). Created if missing; migrated to schema v2 on first open. |
 | `-w, --watch <minutes>` | Re-scan every N minutes (keeps running) |
+
+### `mercator list`
+
+Filter projects by type, tag, or tech-stack entry. Output is one project per line, tab-separated columns (type, path, name, tags, tech) — designed to pipe to `awk`/`cut`/`grep`.
+
+```bash
+mercator list                          # all projects
+mercator list --type Git               # only Git-classified
+mercator list --tech Rust              # projects whose tech-stack contains "Rust"
+mercator list --tag cli --tech Rust    # AND across filters
+```
+
+| Flag | Description |
+|------|-------------|
+| `-d, --db <file>` | SQLite DB file (default: `mercator.db`) |
+| `-t, --type <type>` | Filter by project type (`Git`, `Folder`, `Idea`, `GitHub`, `GitLab`, `Obsidian`) |
+| `--tag <tag>` | Filter by exact tag |
+| `--tech <tech>` | Filter by tech-stack entry |
+
+### `mercator search <query>`
+
+Full-text search across name, description, and tags. Backed by SQLite FTS5. Each whitespace-separated token must match (AND); punctuation inside a word is literal so `cli-tool` finds the project named `cli-tool`. (Tech stack isn't FTS-indexed — use `mercator list --tech` for that.)
+
+```bash
+mercator search agent                  # name/description/tag contains "agent"
+mercator search 'cli-tool'             # hyphenated names work as expected
+mercator search 'rust web'             # AND across both tokens
+```
+
+| Flag | Description |
+|------|-------------|
+| `<query>` | FTS5 query (positional, required) |
+| `-d, --db <file>` | SQLite DB file (default: `mercator.db`) |
 
 ### `mercator export <out_dir>`
 
-Write one markdown file per project. The output is a folder of structured notes that any other tool (Obsidian, Logseq, grep, ripgrep, an LLM) can consume directly.
+Write one markdown file per project. The output is a folder of structured notes that any other tool (Obsidian, Logseq, grep, ripgrep, an LLM) can consume directly. Reads from SQLite — so dashboard purges since the last `mercator survey` are honored.
 
 ```bash
 mercator export ./notes                                         # → ./notes/<project>.md
 mercator export --obsidian-vault ~/Desktop/brain                # → ~/Desktop/brain/Projects/<project>.md
 mercator export --obsidian-vault ~/Desktop/brain \
   --obsidian-folder Mercator                                    # custom subdir
-mercator export ./notes -m custom_map.json                      # use a different map
+mercator export ./notes -d ~/.mercator/main.db                  # use a different DB
 ```
 
 Each note has YAML frontmatter (`name`, `type`, `path`, `branch`, `status`, `last_modified`, `remote`, `agent`, `tech`, `tags`, `obsidian`) plus a body with status, links, and a tag/stack footer. Filenames are sanitised; collisions append ` (N)`.
@@ -181,29 +227,31 @@ Each note has YAML frontmatter (`name`, `type`, `path`, `branch`, `status`, `las
 | Flag | Description |
 |------|-------------|
 | `<out_dir>` | Output directory (default: `./mercator-export`). Created if missing. |
-| `-m, --map-file <file>` | Source map JSON (default: `mercator_map.json`) |
+| `-d, --db <file>` | SQLite DB file (default: `mercator.db`) |
 | `--obsidian-vault <path>` | Write under `<vault>/<folder>/` instead of `out_dir` |
 | `--obsidian-folder <name>` | Subdirectory inside the vault (default: `Projects`) |
 
 ### `mercator serve`
 
-Start the web dashboard.
+Start the web dashboard. All `/api/*` endpoints read and write the SQLite DB; the JSON file is consulted only as a fallback if a DB read errors.
 
 ```bash
 mercator serve                          # http://127.0.0.1:3000
 mercator serve -p 8080                  # Custom port
-mercator serve -b 0.0.0.0              # Listen on all interfaces
-mercator serve -m custom_map.json      # Custom map file
+mercator serve -b 0.0.0.0               # Listen on all interfaces
+mercator serve -d ~/.mercator/main.db   # Custom DB
+mercator serve --refresh ~/code         # Refresh button re-scans this path in-process
 ```
 
 | Flag | Description |
 |------|-------------|
 | `-p, --port <port>` | Port to listen on (default: 3000) |
 | `-b, --bind <ip>` | Bind address (default: 127.0.0.1) |
-| `-m, --map-file <file>` | Path to map JSON (default: `mercator_map.json`) |
+| `-m, --map-file <file>` | Legacy JSON snapshot path (default: `mercator_map.json`) — used only as a fallback if the DB read fails. |
+| `-d, --db <file>` | SQLite DB file (default: `mercator.db`). Source of truth for every read and write. |
 | `--refresh <path>` | Local path the dashboard's refresh button re-scans. Repeat for multiple roots: `serve --refresh ~/code --refresh ~/oss`. Without this, the refresh button just reloads the page. |
 
-The serve command re-reads the JSON file on each request, so running `survey --watch` in the background keeps the dashboard fresh. Alternatively, pass `--refresh <path>` to make the dashboard's refresh button re-scan in-process — quicker for ad-hoc local changes. Remote sources (GitHub/GitLab/Obsidian) are not re-fetched on refresh; use `mercator survey ...` for those.
+Without `--refresh`, the dashboard sees new projects only after a fresh `mercator survey ...`. With `--refresh`, the in-dashboard refresh button re-scans and upserts directly into the live DB — faster for ad-hoc local changes. Remote sources (GitHub/GitLab/Obsidian) are not re-fetched on refresh; use `mercator survey ...` for those.
 
 ## Docker
 
@@ -268,6 +316,14 @@ Everything else is in the [project board](https://github.com/users/zot24/project
 - **Rust** with Tokio async runtime
 - **Axum** web framework
 - **Clap** CLI parser
+- **rusqlite** with `bundled` feature — SQLite + FTS5 compiled into the binary, no system dep
 - **Reqwest** HTTP client
 - **Walkdir** filesystem traversal
 - **Tailwind CSS** + JetBrains Mono for the dashboard UI
+
+## Documentation map
+
+- **[docs/STATUS.md](docs/STATUS.md)** — current state, what just shipped, where things are heading.
+- **[GOALS.md](GOALS.md)** — long-term direction (Phase 1/2/3).
+- **[CLAUDE.md](CLAUDE.md)** — operator's manual for picking up the codebase.
+- **[docs/decisions/](docs/decisions/)** — ADRs for non-obvious design decisions.

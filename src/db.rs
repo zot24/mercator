@@ -1,17 +1,35 @@
-//! SQLite persistence — schema setup, JSON-to-DB migration, and the
-//! read/write helpers the rest of the binary will route through as #24
-//! lands in stages.
+//! SQLite persistence (schema v2) — the source of truth for projects,
+//! tags, tech-stack, obsidian links, the purge blocklist, and the FTS5
+//! search index. Every API endpoint and every CLI subcommand routes
+//! reads and writes through here; the legacy `mercator_map.json` is a
+//! backup snapshot only.
 //!
-//! Stage 1 (this commit) only exposes:
-//! - `open()` — opens a `Connection` and applies schema v1
-//! - `import_from_json()` — one-time idempotent migration from the
-//!   existing `mercator_map.json` + `mercator_purged.json` sidecars
-//! - `load_all_projects()` / `count_projects` / `count_purged` — read
-//!   helpers used by the tests today and by stage-2 handlers later
+//! ## Public surface
 //!
-//! Nothing in `main.rs` reads from the DB yet — the JSON file is still
-//! the source of truth. This stage just gets the DB into existence so
-//! the user can verify the migration before we cut over.
+//! - [`open`] — opens or creates the DB, applies schema v1, then runs
+//!   the v1→v2 migration if needed (creates `projects_fts`, rebuilds
+//!   from existing rows). PRAGMAs: `journal_mode = WAL`,
+//!   `foreign_keys = ON`.
+//! - [`import_from_json`] — one-shot migration from the legacy
+//!   `mercator_map.json` + `mercator_purged.json`. Idempotent. Imports
+//!   the blocklist first so a stale snapshot can't re-introduce a
+//!   purged path (regression-tested).
+//! - [`upsert_projects`] — bulk transactional upsert; the single write
+//!   path used by survey, refresh, and recategorize.
+//! - [`load_all_projects`] / [`search_projects`] / [`list_projects`] —
+//!   read paths, all going through one shared row-hydration helper.
+//! - [`purge_project`] / [`restore_purged`] / [`list_purged`] /
+//!   [`count_projects`] / [`count_purged`] — blocklist + count helpers.
+//!
+//! ## Background
+//!
+//! The migration off `mercator_map.json` shipped across 8 PRs / 7
+//! stages — see [`docs/decisions/0001-sqlite-staged-migration.md`] for
+//! the staging rationale, [`docs/decisions/0002-fts5-default-mode-and-token-quoting.md`]
+//! for the FTS5 mode + query-parser choices.
+//!
+//! [`docs/decisions/0001-sqlite-staged-migration.md`]: ../../docs/decisions/0001-sqlite-staged-migration.md
+//! [`docs/decisions/0002-fts5-default-mode-and-token-quoting.md`]: ../../docs/decisions/0002-fts5-default-mode-and-token-quoting.md
 
 use crate::project::{load_map, Project, ProjectType};
 use rusqlite::{params, Connection};
