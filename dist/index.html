@@ -898,7 +898,29 @@
         saveSettingsToStorage(s); closeSettings(); refreshSurvey();
     }
 
-    function refreshSurvey() { document.getElementById('refresh-icon').textContent = 'hourglass_empty'; location.reload(); }
+    function refreshSurvey() {
+        const icon = document.getElementById('refresh-icon');
+        icon.textContent = 'hourglass_empty';
+        // POST /api/survey/refresh runs a real re-scan when the server was
+        // started with `serve --refresh <path>`. When no refresh paths are
+        // configured, the endpoint returns ok=false; in that case we fall
+        // back to the legacy reload-only behaviour.
+        fetch('/api/survey/refresh', { method: 'POST' })
+            .then(r => r.json())
+            .then(data => {
+                if (data.ok) {
+                    showToast(`SURVEYED ${data.total} PROJECTS`);
+                    setTimeout(() => location.reload(), 400);
+                } else {
+                    icon.textContent = 'sync';
+                    location.reload();
+                }
+            })
+            .catch(() => {
+                icon.textContent = 'sync';
+                location.reload();
+            });
+    }
 
     // ── Categories & Recategorize ─────────────────────────────
     function recategorize() {
