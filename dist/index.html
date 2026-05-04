@@ -195,6 +195,13 @@
             </div>
             <span class="text-[9px]" id="count-agents"><span id="agents-pulse" class="hidden inline-block w-1.5 h-1.5 rounded-full bg-tertiary mr-1" style="animation: pulse 1.5s infinite"></span><span id="agents-count">0</span></span>
         </a>
+        <a class="filter-link flex items-center justify-between text-on-surface-variant p-2 hover:bg-surface-variant rounded-sm mb-1 cursor-pointer transition-colors" data-filter="docs" onclick="showDocsView()">
+            <div class="flex items-center gap-2">
+                <span class="material-symbols-outlined text-[16px]">help</span>
+                <span>HELP</span>
+            </div>
+            <span class="text-[9px]">·</span>
+        </a>
         <div class="mt-3 mb-1 border-t border-outline-variant pt-3"></div>
         <div class="flex items-center justify-between px-2 mb-1">
             <span class="mono text-[9px] text-on-surface-variant uppercase">CATEGORIES</span>
@@ -415,6 +422,227 @@
     <input id="skills-search" type="text" placeholder="Filter skills…"
         class="w-full bg-surface-dim border border-outline-variant focus:border-primary/50 focus:ring-0 text-on-surface text-[11px] mono placeholder:text-outline py-1.5 px-3 mb-3 transition-colors" />
     <div id="skills-list" class="flex flex-col gap-[2px]"></div>
+</div>
+
+<!-- Help / Docs View -->
+<div id="docs-view" class="hidden ml-48 mt-10 p-4 overflow-y-auto h-[calc(100vh-2.5rem-1.5rem)] custom-scrollbar pb-12">
+    <div class="max-w-3xl mx-auto">
+        <div class="flex items-center gap-3 mb-6">
+            <span class="material-symbols-outlined text-[20px] text-primary">help</span>
+            <h1 class="text-on-surface text-sm font-bold mono tracking-tight">MERCATOR — HELP &amp; USAGE</h1>
+        </div>
+        <p class="text-on-surface-variant text-[12px] leading-relaxed mb-8">
+            Mercator surveys your local repos, GitHub, GitLab, and Obsidian into one
+            map. Use this dashboard to browse, search, and act on it. Everything
+            below is also available from the CLI — see the <a href="https://github.com/zot24/mercator/blob/master/README.md" target="_blank" class="text-primary hover:underline">README</a>
+            and <a href="https://github.com/zot24/mercator/blob/master/docs/STATUS.md" target="_blank" class="text-primary hover:underline">docs/STATUS.md</a>
+            for the long form.
+        </p>
+
+        <!-- Quick start -->
+        <section class="mb-8">
+            <h2 class="text-primary text-[10px] font-bold mono uppercase mb-3 pb-1.5 border-b border-outline-variant">QUICK START</h2>
+            <div class="bg-surface-dim border border-outline-variant rounded p-3 mono text-[11px] text-on-surface space-y-1">
+                <div><span class="text-on-surface-variant"># 1. Survey your projects (writes mercator.db + mercator_map.json)</span></div>
+                <div>mercator survey ~/Desktop/code</div>
+                <div class="pt-2"><span class="text-on-surface-variant"># 2. Start the dashboard (this page)</span></div>
+                <div>mercator serve</div>
+                <div class="pt-2"><span class="text-on-surface-variant"># 3. Search or list from the terminal too</span></div>
+                <div>mercator search 'agent'</div>
+                <div>mercator list --tech Rust</div>
+            </div>
+        </section>
+
+        <!-- Project status types -->
+        <section class="mb-8">
+            <h2 class="text-primary text-[10px] font-bold mono uppercase mb-3 pb-1.5 border-b border-outline-variant">PROJECT STATUS &amp; TYPES</h2>
+            <p class="text-on-surface-variant text-[11px] leading-relaxed mb-3">
+                Each project gets a coloured dot for its <em>type</em> (where it came from)
+                and may pick up status badges based on its git state.
+            </p>
+            <div class="space-y-2 text-[11px] mono">
+                <div class="flex items-start gap-3 bg-surface-dim border border-outline-variant rounded p-2.5">
+                    <span class="inline-block w-2 h-2 rounded-full bg-primary mt-1.5 flex-shrink-0"></span>
+                    <div><span class="text-primary font-medium">GIT</span> <span class="text-on-surface-variant">— a local directory with a `.git` folder. Branch, last-commit message, and uncommitted-files state come from `git status`.</span></div>
+                </div>
+                <div class="flex items-start gap-3 bg-surface-dim border border-outline-variant rounded p-2.5">
+                    <span class="inline-block w-2 h-2 rounded-full bg-secondary mt-1.5 flex-shrink-0"></span>
+                    <div><span class="text-secondary font-medium">GITHUB / GITLAB</span> <span class="text-on-surface-variant">— a remote repo fetched from the API. Local Git repos with a matching remote-URL get merged with these (the local one wins; remote enriches metadata).</span></div>
+                </div>
+                <div class="flex items-start gap-3 bg-surface-dim border border-outline-variant rounded p-2.5">
+                    <span class="inline-block w-2 h-2 rounded-full bg-tertiary mt-1.5 flex-shrink-0"></span>
+                    <div><span class="text-tertiary font-medium">IDEA</span> <span class="text-on-surface-variant">— a folder with an `IDEA.md` but no `.git`. The pre-repo state of a project — useful for finding ideas you started but never built.</span></div>
+                </div>
+                <div class="flex items-start gap-3 bg-surface-dim border border-outline-variant rounded p-2.5">
+                    <span class="inline-block w-2 h-2 rounded-full bg-outline mt-1.5 flex-shrink-0"></span>
+                    <div><span class="text-on-surface-variant font-medium">FOLDER</span> <span class="text-on-surface-variant">— a top-level directory that's neither a Git repo nor an idea. Mercator surfaces it so you don't lose track of it.</span></div>
+                </div>
+                <div class="flex items-start gap-3 bg-surface-dim border border-outline-variant rounded p-2.5">
+                    <span class="inline-block w-2 h-2 rounded-full bg-[#a88bfa] mt-1.5 flex-shrink-0"></span>
+                    <div><span class="text-[#a88bfa] font-medium">OBSIDIAN</span> <span class="text-on-surface-variant">— a note or folder under your vault's `Projects/` directory (or a bullet on `@Projects.md`). Linked to the matching code repo when names match.</span></div>
+                </div>
+            </div>
+
+            <p class="text-on-surface-variant text-[11px] leading-relaxed mt-4 mb-2">
+                <strong>Health badges</strong> appear next to a project's name when its git state warrants it:
+            </p>
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-2 text-[11px] mono">
+                <div class="bg-surface-dim border border-outline-variant rounded p-2.5">
+                    <span class="text-error font-medium">DIRTY</span> — <span class="text-on-surface-variant">uncommitted changes. Click to see the file list.</span>
+                </div>
+                <div class="bg-surface-dim border border-outline-variant rounded p-2.5">
+                    <span class="text-on-surface-variant font-medium">STALE</span> — <span class="text-on-surface-variant">no modifications in 21+ days.</span>
+                </div>
+                <div class="bg-surface-dim border border-outline-variant rounded p-2.5">
+                    <span class="text-error font-medium">ROTTING</span> — <span class="text-on-surface-variant">stale AND dirty. Has uncommitted work that's been sitting for weeks.</span>
+                </div>
+                <div class="bg-surface-dim border border-outline-variant rounded p-2.5">
+                    <span class="text-tertiary font-medium">★ FAVOURITE</span> — <span class="text-on-surface-variant">click the star icon. Persists per-browser.</span>
+                </div>
+            </div>
+        </section>
+
+        <!-- Navigation -->
+        <section class="mb-8">
+            <h2 class="text-primary text-[10px] font-bold mono uppercase mb-3 pb-1.5 border-b border-outline-variant">NAVIGATION</h2>
+
+            <div class="text-[11px] leading-relaxed text-on-surface-variant space-y-3">
+                <div>
+                    <strong class="text-on-surface mono">Three views</strong> — top toolbar buttons:
+                    <ul class="list-disc list-inside mt-1 space-y-0.5 ml-2">
+                        <li><strong>LIST</strong> — dense, scannable. Best for "find this project."</li>
+                        <li><strong>BLOCKS</strong> — tile grid. Best for visual scanning.</li>
+                        <li><strong>GRAPH</strong> — D3 force-directed view of project relationships (shared tags, name mentions, idea↔implementation links).</li>
+                    </ul>
+                </div>
+
+                <div>
+                    <strong class="text-on-surface mono">Sidebar filters</strong> narrow the view:
+                    <ul class="list-disc list-inside mt-1 space-y-0.5 ml-2">
+                        <li><strong>By type</strong> — GIT / GITHUB / GITLAB / IDEA / OBSIDIAN / FOLDER.</li>
+                        <li><strong>By health</strong> — DIRTY / STALE / ROTTING / FAVORITES.</li>
+                        <li><strong>By auto-tagged category</strong> — sidebar bottom; categories like ai, web, cli, devops are derived from name + description + tech stack. Click the refresh icon next to <em>CATEGORIES</em> to re-tag without re-surveying.</li>
+                    </ul>
+                </div>
+
+                <div>
+                    <strong class="text-on-surface mono">Search &amp; sort</strong> — search box at the top filters by name; the sort dropdown switches between alphabetical and modified-date order.
+                </div>
+
+                <div>
+                    <strong class="text-on-surface mono">Click a project</strong> for a 3-pane preview: project list, file tree, viewer. Smart auto-open: dirty repos open the most-recently-modified uncommitted file; clean repos open the freshest file under <code>src/</code>/<code>app/</code>/<code>lib/</code>; README is the fallback. Use arrow keys to swap projects without leaving the modal.
+                </div>
+
+                <div>
+                    <strong class="text-on-surface mono">Refresh button</strong> (top toolbar) re-scans the local paths the binary was started with via <code>--refresh &lt;path&gt;</code> AND re-fetches GitHub / GitLab when you've configured a token (see Config below). Without <code>--refresh</code>, it just reloads the page.
+                </div>
+
+                <div>
+                    <strong class="text-on-surface mono">Purge a project</strong> via the trash icon on its row. The blocklist is sticky — future surveys keep it gone. Restore from the settings modal's PURGED_PATHS section.
+                </div>
+            </div>
+        </section>
+
+        <!-- CLI -->
+        <section class="mb-8">
+            <h2 class="text-primary text-[10px] font-bold mono uppercase mb-3 pb-1.5 border-b border-outline-variant">CLI COMMANDS</h2>
+            <p class="text-on-surface-variant text-[11px] leading-relaxed mb-4">
+                Every dashboard surface has a CLI counterpart. Useful for piping (<code>awk</code>/<code>cut</code>/<code>grep</code>), scripts, or when you don't want to leave the terminal.
+            </p>
+
+            <div class="space-y-4">
+                <div class="bg-surface-dim border border-outline-variant rounded p-3">
+                    <div class="mono text-[11px] font-medium text-primary mb-2">mercator survey &lt;paths…&gt;</div>
+                    <p class="text-[11px] text-on-surface-variant leading-relaxed mb-2">
+                        Walks the given directories, fetches any configured remote sources, dedupes, auto-tags, and writes the result to the SQLite DB (and a JSON snapshot for backup).
+                    </p>
+                    <pre class="mono text-[10px] text-on-surface bg-surface border border-outline-variant rounded p-2 overflow-x-auto">mercator survey ~/code
+mercator survey ~/code ~/work --watch 5
+mercator survey ~/code --github zot24 --gitlab zot24
+mercator survey ~/code -d ~/.mercator/main.db</pre>
+                </div>
+
+                <div class="bg-surface-dim border border-outline-variant rounded p-3">
+                    <div class="mono text-[11px] font-medium text-primary mb-2">mercator serve</div>
+                    <p class="text-[11px] text-on-surface-variant leading-relaxed mb-2">
+                        Starts this dashboard. Reads everything from the DB; the JSON file is consulted only as a fallback if a DB read errors. Pass <code>--refresh &lt;path&gt;</code> to make the in-page refresh button re-scan locally.
+                    </p>
+                    <pre class="mono text-[10px] text-on-surface bg-surface border border-outline-variant rounded p-2 overflow-x-auto">mercator serve
+mercator serve -p 8080
+mercator serve --refresh ~/code
+mercator serve -d ~/.mercator/main.db</pre>
+                </div>
+
+                <div class="bg-surface-dim border border-outline-variant rounded p-3">
+                    <div class="mono text-[11px] font-medium text-primary mb-2">mercator list</div>
+                    <p class="text-[11px] text-on-surface-variant leading-relaxed mb-2">
+                        Print projects as tab-separated rows: <code>type \t path \t name \t tags \t tech</code>. Filter by type / tag / tech (combine for AND).
+                    </p>
+                    <pre class="mono text-[10px] text-on-surface bg-surface border border-outline-variant rounded p-2 overflow-x-auto">mercator list
+mercator list --type Git
+mercator list --tech Rust
+mercator list --tag cli --tech Rust</pre>
+                </div>
+
+                <div class="bg-surface-dim border border-outline-variant rounded p-3">
+                    <div class="mono text-[11px] font-medium text-primary mb-2">mercator search &lt;query&gt;</div>
+                    <p class="text-[11px] text-on-surface-variant leading-relaxed mb-2">
+                        Full-text search across name, description, and tags via SQLite FTS5. Each whitespace-separated token must match (AND); punctuation inside a word is literal so <code>cli-tool</code> works.
+                    </p>
+                    <pre class="mono text-[10px] text-on-surface bg-surface border border-outline-variant rounded p-2 overflow-x-auto">mercator search agent
+mercator search 'cli-tool'
+mercator search 'rust web'</pre>
+                    <p class="text-[10px] text-on-surface-variant leading-relaxed mt-2">
+                        Tech stack isn't FTS-indexed — use <code>mercator list --tech Rust</code> for that.
+                    </p>
+                </div>
+
+                <div class="bg-surface-dim border border-outline-variant rounded p-3">
+                    <div class="mono text-[11px] font-medium text-primary mb-2">mercator export &lt;out_dir&gt;</div>
+                    <p class="text-[11px] text-on-surface-variant leading-relaxed mb-2">
+                        Write one markdown file per project (with YAML frontmatter), so any tool — Obsidian, Logseq, ripgrep, an LLM — can consume the map directly.
+                    </p>
+                    <pre class="mono text-[10px] text-on-surface bg-surface border border-outline-variant rounded p-2 overflow-x-auto">mercator export ./notes
+mercator export --obsidian-vault ~/Desktop/brain
+mercator export --obsidian-vault ~/Desktop/brain --obsidian-folder Mercator</pre>
+                </div>
+            </div>
+
+            <p class="text-[10px] text-on-surface-variant leading-relaxed mt-3">
+                <code>--help</code> on any subcommand gives the full flag list. <code>-d/--db</code> defaults to <code>mercator.db</code> for every command.
+            </p>
+        </section>
+
+        <!-- Config file -->
+        <section class="mb-8">
+            <h2 class="text-primary text-[10px] font-bold mono uppercase mb-3 pb-1.5 border-b border-outline-variant">CONFIG FILE</h2>
+            <p class="text-[11px] leading-relaxed text-on-surface-variant mb-3">
+                User-level settings live at <code>~/.config/mercator/config.toml</code> (mode 0600 on unix). Set it up so the dashboard's refresh button can hit private repos and you don't have to retype tokens at the CLI.
+            </p>
+            <pre class="mono text-[10px] text-on-surface bg-surface-dim border border-outline-variant rounded p-3 overflow-x-auto">[github]
+user = "zot24"
+token = "ghp_xxxxx"   # optional — public repos work without it (60/hr cap)
+
+[gitlab]
+user = "zot24"
+token = "glpat-xxxxx" # optional</pre>
+            <p class="text-[11px] leading-relaxed text-on-surface-variant mt-3">
+                You can also edit it from the <button onclick="closeDocsView(); openSettings();" class="text-primary hover:underline">settings panel</button> — tokens never appear in the response from <code>GET /api/settings</code>, only a <code>*_token_set</code> boolean for the "you have a token configured" hint.
+            </p>
+        </section>
+
+        <!-- More docs -->
+        <section class="mb-4">
+            <h2 class="text-primary text-[10px] font-bold mono uppercase mb-3 pb-1.5 border-b border-outline-variant">MORE</h2>
+            <ul class="text-[11px] text-on-surface-variant space-y-1.5 mono">
+                <li>· <a href="https://github.com/zot24/mercator/blob/master/README.md" target="_blank" class="text-primary hover:underline">README.md</a> — public-facing pitch + full CLI reference</li>
+                <li>· <a href="https://github.com/zot24/mercator/blob/master/docs/STATUS.md" target="_blank" class="text-primary hover:underline">docs/STATUS.md</a> — what's shipped, what's heading next, known sharp edges</li>
+                <li>· <a href="https://github.com/zot24/mercator/blob/master/GOALS.md" target="_blank" class="text-primary hover:underline">GOALS.md</a> — Phase 1/2/3 roadmap</li>
+                <li>· <a href="https://github.com/zot24/mercator/tree/master/docs/decisions" target="_blank" class="text-primary hover:underline">docs/decisions/</a> — ADRs (why each non-obvious design call was made)</li>
+                <li>· <a href="https://github.com/zot24/mercator/issues" target="_blank" class="text-primary hover:underline">Open issues</a> · <a href="https://github.com/users/zot24/projects/12" target="_blank" class="text-primary hover:underline">project board</a></li>
+            </ul>
+        </section>
+    </div>
 </div>
 
 <!-- Project Preview Modal -->
@@ -1169,6 +1397,7 @@
         document.getElementById('graph-container').classList.add('hidden');
         document.getElementById('agents-view').classList.remove('hidden');
         document.getElementById('skills-view').classList.add('hidden');
+        document.getElementById('docs-view').classList.add('hidden');
         document.querySelector('main').classList.add('hidden');
         fetchAndRenderJobs();
         startAgentPolling();
@@ -1179,6 +1408,37 @@
         document.querySelector('main').classList.remove('hidden');
     }
 
+    function showDocsView() {
+        document.getElementById('map').classList.add('hidden');
+        document.getElementById('graph-container').classList.add('hidden');
+        document.getElementById('agents-view').classList.add('hidden');
+        document.getElementById('skills-view').classList.add('hidden');
+        document.getElementById('docs-view').classList.remove('hidden');
+        document.querySelector('main').classList.add('hidden');
+    }
+
+    function hideDocsView() {
+        document.getElementById('docs-view').classList.add('hidden');
+        document.querySelector('main').classList.remove('hidden');
+    }
+
+    // Used by the "settings panel" link inside the docs view: closes
+    // the help screen and pops the modal in one click.
+    function closeDocsView() {
+        // Restore the "all" filter highlight so the sidebar reflects state.
+        const allLink = document.querySelector('.filter-link[data-filter="all"]');
+        if (allLink) {
+            document.querySelectorAll('.filter-link').forEach(l => {
+                l.classList.remove('text-primary', 'bg-surface-variant/50', 'active');
+                l.classList.add('text-on-surface-variant');
+            });
+            allLink.classList.add('text-primary', 'bg-surface-variant/50', 'active');
+            allLink.classList.remove('text-on-surface-variant');
+            currentFilter = 'all';
+        }
+        hideDocsView();
+    }
+
     // ── Skills ──────────────────────────────────────────────────
     let skills = [];
     let skillTab = 'used';
@@ -1186,6 +1446,7 @@
     function showSkillsView() {
         document.getElementById('agents-view').classList.add('hidden');
         document.getElementById('skills-view').classList.remove('hidden');
+        document.getElementById('docs-view').classList.add('hidden');
         document.querySelector('main').classList.add('hidden');
         loadSkills();
     }
@@ -1590,9 +1851,12 @@
             link.classList.add('text-primary', 'bg-surface-variant/50', 'active');
             link.classList.remove('text-on-surface-variant');
             currentFilter = link.dataset.filter;
-            if (link.dataset.filter === 'agents' || link.dataset.filter === 'skills') return; // handled by their own show fn
+            // agents/skills/docs each have their own show fn; the main
+            // view stays hidden until the user picks a non-special filter.
+            if (link.dataset.filter === 'agents' || link.dataset.filter === 'skills' || link.dataset.filter === 'docs') return;
             hideAgentsView();
             hideSkillsView();
+            hideDocsView();
             renderProjects();
             if (currentView === 'graph' && graphData) renderGraph(graphData);
         });
