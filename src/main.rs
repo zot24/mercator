@@ -1553,6 +1553,11 @@ mod tests {
             ProjectType::GitHub,
             Some("https://github.com/zot24/mercator"),
         );
+        // Remote-fetched entries set `path` to the html_url; that's how
+        // `is_remote_fetched` in dedup discriminates them from local
+        // surveys. Without this, the test row looks like a local clone
+        // and dedup correctly keeps it as a separate entry.
+        remote.path = "https://github.com/zot24/mercator".to_string();
         remote.description = "Cartography for your local landscape".to_string();
         remote.tech_stack = vec!["Rust".to_string()];
 
@@ -1568,10 +1573,42 @@ mod tests {
 
     #[test]
     fn deduplicate_keeps_remote_only_projects() {
-        let only_remote = project("foo", ProjectType::GitHub, Some("https://github.com/x/foo"));
+        // Match the actual shape `fetch_github_repos` produces: `path`
+        // is the html_url, not a filesystem path. The `is_remote_fetched`
+        // discriminator in dedup looks for `https://` here.
+        let mut only_remote = project("foo", ProjectType::GitHub, Some("https://github.com/x/foo"));
+        only_remote.path = "https://github.com/x/foo".to_string();
         let merged = deduplicate_projects(vec![only_remote]);
         assert_eq!(merged.len(), 1);
         assert!(matches!(merged[0].project_type, ProjectType::GitHub));
+    }
+
+    #[test]
+    fn deduplicate_keeps_multiple_local_clones_of_the_same_upstream() {
+        // Regression: classify-by-remote (#64) made local Git repos
+        // with a github.com origin classify as `ProjectType::GitHub`,
+        // which routed them through dedup's URL-keyed map. Two clones
+        // of the same upstream collided there and the second silently
+        // overwrote the first. Locals must always be path-distinct;
+        // only API-fetched entries get URL-keyed.
+        let mut a = project(
+            "mercator",
+            ProjectType::GitHub,
+            Some("git@github.com:zot24/mercator.git"),
+        );
+        a.path = "/Users/me/work/mercator".into();
+        let mut b = project(
+            "mercator-fork",
+            ProjectType::GitHub,
+            Some("git@github.com:zot24/mercator.git"),
+        );
+        b.path = "/Users/me/oss/mercator-fork".into();
+
+        let merged = deduplicate_projects(vec![a, b]);
+        assert_eq!(merged.len(), 2, "both local clones must survive dedup");
+        let paths: std::collections::HashSet<_> = merged.iter().map(|p| p.path.clone()).collect();
+        assert!(paths.contains("/Users/me/work/mercator"));
+        assert!(paths.contains("/Users/me/oss/mercator-fork"));
     }
 
     // ── auto_tag_projects ──────────────────────────────────────────────
