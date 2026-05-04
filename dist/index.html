@@ -332,6 +332,12 @@
                 class="w-full bg-surface-dim border border-outline-variant text-on-surface text-[11px] mono p-2 focus:border-primary/50 focus:ring-0 rounded" placeholder="glpat-xxxxx"/>
         </div>
 
+        <div class="mono text-[9px] font-medium text-on-surface-variant uppercase mb-2 pb-1.5 border-b border-outline-variant">PURGED_PATHS</div>
+        <div class="mb-4">
+            <div id="purged-list" class="flex flex-col gap-1 max-h-40 overflow-y-auto custom-scrollbar"></div>
+            <p class="text-[9px] text-on-surface-variant mt-2 mono">Restore re-allows a path. Run a survey to re-add it to the map.</p>
+        </div>
+
         <div class="flex justify-end gap-2 mt-5">
             <button onclick="closeSettings()" class="mono px-3 py-1.5 text-[10px] border border-outline-variant text-on-surface-variant hover:text-on-surface hover:border-on-surface-variant transition-colors rounded">CANCEL</button>
             <button onclick="saveSettings()" class="mono px-3 py-1.5 text-[10px] bg-primary text-surface-dim font-medium hover:brightness-110 transition-all rounded">SAVE</button>
@@ -880,8 +886,46 @@
         document.getElementById('gitlab-user').value = s.gitlab.user;
         document.getElementById('gitlab-url').value = s.gitlab.url;
         document.getElementById('gitlab-token').value = s.gitlab.token;
+        loadPurgedList();
         const m = document.getElementById('settings-modal');
         m.classList.remove('hidden'); m.classList.add('flex');
+    }
+
+    function loadPurgedList() {
+        const container = document.getElementById('purged-list');
+        container.innerHTML = '<div class="text-[10px] mono text-on-surface-variant px-2 py-1.5">LOADING…</div>';
+        fetch('/api/purged')
+            .then(r => r.json())
+            .then(paths => renderPurgedList(paths))
+            .catch(e => { container.innerHTML = `<div class="text-[10px] mono text-error px-2 py-1.5">ERROR: ${escapeHtml(String(e))}</div>`; });
+    }
+
+    function renderPurgedList(paths) {
+        const container = document.getElementById('purged-list');
+        if (!paths || paths.length === 0) {
+            container.innerHTML = '<div class="text-[10px] mono text-on-surface-variant px-2 py-1.5">NO PURGED PATHS</div>';
+            return;
+        }
+        container.innerHTML = paths.map(path => {
+            const safe = path.replace(/'/g, "\\'");
+            return `<div class="flex items-center justify-between gap-2 bg-surface-dim border border-outline-variant rounded px-2 py-1.5">
+                <span class="text-[10px] mono text-on-surface truncate" title="${escapeHtml(path)}">${escapeHtml(path)}</span>
+                <button onclick="restorePurgedPath('${safe}', event)" class="mono px-2 py-0.5 text-[9px] border border-outline-variant text-on-surface-variant hover:text-primary hover:border-primary transition-colors rounded flex-shrink-0">RESTORE</button>
+            </div>`;
+        }).join('');
+    }
+
+    function restorePurgedPath(path, ev) {
+        if (ev) ev.stopPropagation();
+        fetch('/api/project/restore', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ path }),
+        }).then(r => r.json()).then(data => {
+            if (!data.ok) { showToast('RESTORE FAILED: ' + (data.error || 'unknown'), true); return; }
+            loadPurgedList();
+            showToast(`RESTORED — ${data.remaining} PURGED REMAIN`);
+        }).catch(e => showToast('ERROR: ' + e, true));
     }
 
     function closeSettings() {
