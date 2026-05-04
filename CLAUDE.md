@@ -148,7 +148,7 @@ All three must be green before merge.
 
 1. **`Cargo.toml` has no `swarm` dep declared by default.** Feature `swarm` is just a flag — adding `--features swarm` without manually adding the path dep will fail to build. Intentional until [#21](https://github.com/zot24/mercator/issues/21) lands.
 2. **GitHub / GitLab fetches surface errors via `eprintln!`** but don't propagate them as structured `SourceError` variants yet (the enum has only `Generic(String)`). Will be split when [#8](https://github.com/zot24/mercator/issues/8) needs to discriminate.
-3. **Settings panel UI still writes tokens to localStorage** ([#2](https://github.com/zot24/mercator/issues/2) is partially closed). The server-side `~/.config/mercator/config.toml` + `GET /api/settings` + refresh-uses-config wiring shipped today; the UI cutover (POST `/api/settings`, drop the localStorage write) is the follow-up.
+3. ~~Settings panel UI writes tokens to localStorage~~ — **closed by [#2](https://github.com/zot24/mercator/issues/2)**. Tokens now live in `~/.config/mercator/config.toml` (mode 0600); the dashboard's settings panel reads `GET /api/settings` for the redacted shape and writes via `POST /api/settings`. Legacy `mercator-settings` localStorage rows are migrated on first settings open.
 4. **`osascript` Terminal launcher is macOS-only**. Closed as wontfix-for-now ([#17](https://github.com/zot24/mercator/issues/17)).
 5. **Dashboard runs at `127.0.0.1` by default; Docker too**. Expose with `-b 0.0.0.0` *and* `MERCATOR_TOKEN`.
 6. **`agent_jobs` table is not in the schema yet.** Swarm-feature agent runner keeps state in process memory; restart loses the job list. Stage 5 of the SQLite work, not yet scheduled.

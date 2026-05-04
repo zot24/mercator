@@ -748,6 +748,75 @@ async fn settings_api(State(state): State<AppState>) -> Json<config::RedactedCon
     Json(cfg.redacted())
 }
 
+/// `POST /api/settings` — update user-level config from the dashboard's
+/// settings panel. Fields are independent and sparse:
+///
+/// - `*_user`: if the field is present (even empty), the user is set to
+///   that value. Absent = no change.
+/// - `*_token`: if the field is present and **non-empty**, the token is
+///   replaced. Absent or empty = no change. This is what lets the
+///   dashboard show "(saved — leave blank to keep)" without accidentally
+///   clearing the token when the user only wanted to update their
+///   username.
+/// - `*_clear_token`: if `true`, the token is cleared regardless of
+///   what `*_token` holds. Explicit opt-in for the destructive action.
+///
+/// On success the redacted config is returned (same shape as `GET`),
+/// so the frontend can refresh its view without a second round-trip.
+#[derive(Deserialize, Default)]
+struct SettingsUpdate {
+    #[serde(default)]
+    github_user: Option<String>,
+    #[serde(default)]
+    github_token: Option<String>,
+    #[serde(default)]
+    github_clear_token: bool,
+    #[serde(default)]
+    gitlab_user: Option<String>,
+    #[serde(default)]
+    gitlab_token: Option<String>,
+    #[serde(default)]
+    gitlab_clear_token: bool,
+}
+
+async fn settings_update_api(
+    State(state): State<AppState>,
+    Json(update): Json<SettingsUpdate>,
+) -> Json<serde_json::Value> {
+    let mut cfg = state.cfg.lock().await;
+
+    // Apply per-field updates. Strings are trimmed on input — leading/
+    // trailing whitespace in a token is almost always a paste artifact,
+    // and rejecting it silently here saves a round-trip of confusion.
+    if let Some(u) = update.github_user {
+        cfg.github.user = Some(u.trim().to_string()).filter(|s| !s.is_empty());
+    }
+    if update.github_clear_token {
+        cfg.github.token = None;
+    } else if let Some(t) = update.github_token {
+        let trimmed = t.trim();
+        if !trimmed.is_empty() {
+            cfg.github.token = Some(trimmed.to_string());
+        }
+    }
+    if let Some(u) = update.gitlab_user {
+        cfg.gitlab.user = Some(u.trim().to_string()).filter(|s| !s.is_empty());
+    }
+    if update.gitlab_clear_token {
+        cfg.gitlab.token = None;
+    } else if let Some(t) = update.gitlab_token {
+        let trimmed = t.trim();
+        if !trimmed.is_empty() {
+            cfg.gitlab.token = Some(trimmed.to_string());
+        }
+    }
+
+    if let Err(e) = config::save_to(&config::config_path(), &cfg) {
+        return Json(serde_json::json!({ "ok": false, "error": e }));
+    }
+    Json(serde_json::json!({ "ok": true, "settings": cfg.redacted() }))
+}
+
 async fn recategorize_api(State(state): State<AppState>) -> Json<serde_json::Value> {
     // Read the live state from the DB — it's been the source of truth
     // since stage 2a, and we want recategorize to see whatever purges /
@@ -1164,7 +1233,7 @@ async fn main() {
                 .route("/api/categorize", post(recategorize_api))
                 .route("/api/survey/refresh", post(refresh_survey_api))
                 .route("/api/skills", get(skills_api))
-                .route("/api/settings", get(settings_api))
+                .route("/api/settings", get(settings_api).post(settings_update_api))
                 .route("/api/project/purge", post(purge_project_api))
                 .route("/api/project/restore", post(restore_project_api))
                 .route("/api/purged", get(purged_list_api))
