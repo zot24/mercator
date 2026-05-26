@@ -56,7 +56,7 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use serde::{Deserialize, Serialize};
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
@@ -71,6 +71,18 @@ use tower_http::services::ServeDir;
 struct Cli {
     #[command(subcommand)]
     command: Commands,
+}
+
+/// Output format for the `list` and `search` subcommands. `Text` is the
+/// tab-separated row format that has been stable since #25 shipped — safe
+/// for `awk` / `cut` / `grep` pipelines. `Json` is a JSON array of full
+/// `Project` records (same Serde shape as `/api/map`), so callers can pipe
+/// straight into `jq` and access fields the tab format drops (description,
+/// gitBranch, lastCommit, remoteUrl, agentUsed, …).
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+enum OutputFormat {
+    Text,
+    Json,
 }
 
 #[derive(Subcommand)]
@@ -138,9 +150,11 @@ enum Commands {
         db: PathBuf,
     },
     /// List projects from the DB, optionally filtered by type / tag / tech.
-    /// Output is one project per line, tab-separated columns (type, path,
-    /// name, tags-comma-joined, tech-comma-joined) so you can pipe to
-    /// `awk` / `cut` / `grep`. Closes #25 alongside `search`.
+    /// Default output is one project per line, tab-separated columns (type,
+    /// path, name, tags-comma-joined, tech-comma-joined) so you can pipe to
+    /// `awk` / `cut` / `grep`. Use `--format json` for a JSON array of full
+    /// project records (matches the `/api/map` shape). Closes #25 alongside
+    /// `search`.
     List {
         /// SQLite database file
         #[arg(short = 'd', long, default_value = "mercator.db")]
@@ -157,6 +171,12 @@ enum Commands {
         /// Filter by tech-stack entry (e.g. "Rust", "Node.js")
         #[arg(long)]
         tech: Option<String>,
+
+        /// Output format: `text` (default, tab-separated for shell pipelines)
+        /// or `json` (a JSON array of full project records, matching the
+        /// `/api/map` shape — feed to `jq`, scripts, or other tools).
+        #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+        format: OutputFormat,
     },
     /// Full-text search projects by name, description, and tags. Each
     /// whitespace-separated token must match (AND); punctuation inside
@@ -173,6 +193,12 @@ enum Commands {
         /// SQLite database file
         #[arg(short = 'd', long, default_value = "mercator.db")]
         db: PathBuf,
+
+        /// Output format: `text` (default, tab-separated for shell pipelines)
+        /// or `json` (a JSON array of full project records, matching the
+        /// `/api/map` shape — feed to `jq`, scripts, or other tools).
+        #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+        format: OutputFormat,
     },
     /// Export the map as one markdown file per project (one folder of
     /// structured notes that any other tool can consume)
@@ -849,7 +875,7 @@ async fn skills_api(State(state): State<AppState>) -> Json<Vec<crate::skills::Sk
 /// Tab-separated single-line project row for `mercator list` / `search`.
 /// Columns: type, path, name, tags (comma-joined), tech (comma-joined).
 /// Stable for shell pipelines (`awk -F'\t'`, `cut -f`, `grep`).
-fn print_project_row(p: &Project) {
+fn format_project_row(p: &Project) -> String {
     let project_type = match p.project_type {
         ProjectType::Git => "Git",
         ProjectType::Folder => "Folder",
@@ -858,14 +884,25 @@ fn print_project_row(p: &Project) {
         ProjectType::GitLab => "GitLab",
         ProjectType::Obsidian => "Obsidian",
     };
-    println!(
+    format!(
         "{}\t{}\t{}\t{}\t{}",
         project_type,
         p.path,
         p.name,
         p.tags.join(","),
         p.tech_stack.join(","),
-    );
+    )
+}
+
+/// Pretty-printed JSON array of full `Project` records for `--format json`.
+/// Same Serde shape as `/api/map` so callers can use the same `jq` filters
+/// against either surface. Pretty-print (not compact) so `jq`-less humans
+/// can still skim the output; downstream tools that want compact JSON can
+/// pipe through `jq -c .`.
+fn format_projects_json(projects: &[Project]) -> String {
+    // Safe to unwrap: `Project` derives `Serialize` and contains only
+    // serializable fields, so `to_string_pretty` cannot fail at runtime.
+    serde_json::to_string_pretty(projects).expect("Project is always serializable")
 }
 
 #[tokio::main]
@@ -1071,6 +1108,7 @@ async fn main() {
             project_type,
             tag,
             tech,
+            format,
         } => {
             let conn = match db::open(&db_path) {
                 Ok(c) => c,
@@ -1091,12 +1129,23 @@ async fn main() {
                     std::process::exit(1);
                 }
             };
-            for p in &projects {
-                print_project_row(p);
+            match format {
+                OutputFormat::Text => {
+                    for p in &projects {
+                        println!("{}", format_project_row(p));
+                    }
+                }
+                OutputFormat::Json => {
+                    println!("{}", format_projects_json(&projects));
+                }
             }
             eprintln!("\n{} projects", projects.len());
         }
-        Commands::Search { query, db: db_path } => {
+        Commands::Search {
+            query,
+            db: db_path,
+            format,
+        } => {
             let conn = match db::open(&db_path) {
                 Ok(c) => c,
                 Err(e) => {
@@ -1111,8 +1160,15 @@ async fn main() {
                     std::process::exit(1);
                 }
             };
-            for p in &projects {
-                print_project_row(p);
+            match format {
+                OutputFormat::Text => {
+                    for p in &projects {
+                        println!("{}", format_project_row(p));
+                    }
+                }
+                OutputFormat::Json => {
+                    println!("{}", format_projects_json(&projects));
+                }
             }
             eprintln!("\n{} projects matched {:?}", projects.len(), query);
         }
@@ -2350,5 +2406,92 @@ mod tests {
         let found = scan_obsidian_vault(vault.path(), "Projects", "myvault");
         let names: Vec<_> = found.iter().map(|p| p.name.as_str()).collect();
         assert_eq!(names, vec!["real"]);
+    }
+
+    // ── list / search output formats ───────────────────────────────────
+
+    #[test]
+    fn format_project_row_emits_five_tab_separated_columns() {
+        // Stable contract for shell pipelines (`awk -F'\t' '{print $2}'`).
+        // The columns are: type, path, name, tags, tech.
+        let mut p = project("acme", ProjectType::Git, None);
+        p.path = "/tmp/acme".into();
+        p.tags = vec!["cli".into(), "devops".into()];
+        p.tech_stack = vec!["Rust".into(), "Tokio".into()];
+
+        let row = format_project_row(&p);
+        let cols: Vec<&str> = row.split('\t').collect();
+        assert_eq!(
+            cols,
+            vec!["Git", "/tmp/acme", "acme", "cli,devops", "Rust,Tokio"]
+        );
+    }
+
+    #[test]
+    fn format_project_row_handles_empty_tags_and_tech() {
+        // Empty vec must serialize as an empty column, not the literal
+        // `[]` — pipelines split on `\t` and expect to see five fields.
+        let p = project("bare", ProjectType::Folder, None);
+        let row = format_project_row(&p);
+        let cols: Vec<&str> = row.split('\t').collect();
+        assert_eq!(cols.len(), 5);
+        assert_eq!(cols[3], "");
+        assert_eq!(cols[4], "");
+    }
+
+    #[test]
+    fn format_projects_json_round_trips_through_project_struct() {
+        // The JSON output must deserialize back into `Vec<Project>`
+        // unchanged — this is the wire-shape contract for downstream
+        // tooling and matches the `/api/map` payload.
+        let mut p = project(
+            "acme",
+            ProjectType::GitHub,
+            Some("https://github.com/x/acme"),
+        );
+        p.tags = vec!["cli".into()];
+        p.tech_stack = vec!["Rust".into()];
+        p.description = "A test project".into();
+        let input = vec![p];
+
+        let json = format_projects_json(&input);
+        let parsed: Vec<Project> = serde_json::from_str(&json).expect("output must be valid JSON");
+
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].name, "acme");
+        assert!(matches!(parsed[0].project_type, ProjectType::GitHub));
+        assert_eq!(parsed[0].tags, vec!["cli".to_string()]);
+        assert_eq!(parsed[0].tech_stack, vec!["Rust".to_string()]);
+        assert_eq!(
+            parsed[0].remote_url.as_deref(),
+            Some("https://github.com/x/acme")
+        );
+    }
+
+    #[test]
+    fn format_projects_json_empty_input_is_empty_array() {
+        // `mercator list --format json` on a no-match filter must emit a
+        // valid empty JSON array — `jq` consumers rely on this rather
+        // than having to special-case empty stdout.
+        let out = format_projects_json(&[]);
+        assert_eq!(out.trim(), "[]");
+    }
+
+    #[test]
+    fn format_projects_json_uses_camelcase_field_names() {
+        // The Serde renames on `Project` (`techStack`, `remoteUrl`, …)
+        // are part of the public contract — the JSON shape must match
+        // what `/api/map` already serves so downstream `jq` filters work
+        // against either surface unchanged.
+        let mut p = project("acme", ProjectType::Git, Some("https://example.com/acme"));
+        p.tech_stack = vec!["Rust".into()];
+        p.git_branch = Some("master".into());
+
+        let json = format_projects_json(&[p]);
+        assert!(json.contains("\"techStack\""));
+        assert!(json.contains("\"remoteUrl\""));
+        assert!(json.contains("\"gitBranch\""));
+        assert!(!json.contains("\"tech_stack\""));
+        assert!(!json.contains("\"remote_url\""));
     }
 }
