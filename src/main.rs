@@ -85,6 +85,42 @@ enum OutputFormat {
     Json,
 }
 
+#[derive(Subcommand, Debug)]
+enum ActiveCommand {
+    /// Mark a path as currently active. Re-adding refreshes the
+    /// timestamp and replaces the optional note.
+    Add {
+        /// Absolute or relative path; trailing slash is trimmed. The
+        /// path is *not* required to exist in the projects table — the
+        /// active set is orthogonal to surveyed state.
+        path: PathBuf,
+        /// Free-form note attached to the active entry (e.g. "shipping
+        /// active export"). Visible to consumers of the JSON export.
+        #[arg(long, short = 'n')]
+        note: Option<String>,
+    },
+    /// Remove a path from the active list. No-op if the path isn't on
+    /// the list (exit 0, prints a warning to stderr).
+    Remove {
+        /// Path to deactivate. Trailing slash trimmed for parity with
+        /// `add`.
+        path: PathBuf,
+    },
+    /// Print the active list. Default output is tab-separated
+    /// (path, activated_at, note) ordered most-recent-first; use
+    /// `--format json` for a richer shape that joins in project
+    /// metadata when known (description, type, tech_stack, tags).
+    List {
+        #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+        format: OutputFormat,
+    },
+    /// Re-write the JSON snapshot from the current DB state without
+    /// changing the active set. Useful when project metadata changed
+    /// (e.g. after a re-survey) and you want Hermes to see the
+    /// updated description/tags.
+    Export,
+}
+
 #[derive(Subcommand)]
 #[allow(clippy::large_enum_variant)] // CLI args parsed once at startup; size doesn't matter
 enum Commands {
@@ -172,11 +208,37 @@ enum Commands {
         #[arg(long)]
         tech: Option<String>,
 
+        /// Show only projects on the active list (see `mercator active`).
+        /// AND-combined with the other filters.
+        #[arg(long)]
+        active: bool,
+
         /// Output format: `text` (default, tab-separated for shell pipelines)
         /// or `json` (a JSON array of full project records, matching the
         /// `/api/map` shape — feed to `jq`, scripts, or other tools).
         #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
         format: OutputFormat,
+    },
+    /// Manage the "currently working on" list. The active set is
+    /// orthogonal to surveyed state — it survives re-surveys, and a path
+    /// can be activated before being surveyed. Every mutation writes
+    /// `active-projects.json` (next to the DB by default) so external
+    /// agents (Hermes, session-loaders) can pick up context without
+    /// shelling into the DB.
+    Active {
+        #[command(subcommand)]
+        action: ActiveCommand,
+
+        /// SQLite database file
+        #[arg(short = 'd', long, default_value = "mercator.db", global = true)]
+        db: PathBuf,
+
+        /// Path the JSON snapshot is auto-written to after every
+        /// add/remove. Defaults to `active-projects.json` next to the
+        /// DB. Pass `--export -` (or any path containing `/dev/null`)
+        /// to suppress.
+        #[arg(long, global = true)]
+        export: Option<PathBuf>,
     },
     /// Full-text search projects by name, description, and tags. Each
     /// whitespace-separated token must match (AND); punctuation inside
@@ -905,6 +967,121 @@ fn format_projects_json(projects: &[Project]) -> String {
     serde_json::to_string_pretty(projects).expect("Project is always serializable")
 }
 
+/// Default JSON snapshot path for the active list — lives next to the DB
+/// file so a project with multiple DBs (per-corpus testing, e.g.) gets a
+/// matching pair of files.
+fn default_active_export_path(db_path: &Path) -> PathBuf {
+    let parent = db_path.parent().unwrap_or_else(|| Path::new("."));
+    parent.join("active-projects.json")
+}
+
+/// Build the Hermes-ready JSON payload for the active list. Each row is
+/// the raw `active_projects` record (path, activated_at, note) enriched
+/// with `name`/`type`/`description`/`tech_stack`/`tags` *when the path
+/// is also in the `projects` table*. Unsurveyed-active paths come
+/// through with the project metadata fields omitted — Hermes can still
+/// `cd` there and the path is the only load-bearing field for context
+/// loading.
+fn build_active_export(
+    active: &[db::ActiveProject],
+    project_lookup: &std::collections::HashMap<String, Project>,
+) -> serde_json::Value {
+    let entries: Vec<serde_json::Value> = active
+        .iter()
+        .map(|a| {
+            let mut entry = serde_json::json!({
+                "path": a.path,
+                "activated_at": a.activated_at,
+            });
+            if let Some(note) = &a.note {
+                entry["note"] = serde_json::Value::String(note.clone());
+            }
+            if let Some(p) = project_lookup.get(a.path.trim_end_matches('/')) {
+                entry["name"] = serde_json::Value::String(p.name.clone());
+                entry["type"] = serde_json::Value::String(
+                    match p.project_type {
+                        ProjectType::Git => "Git",
+                        ProjectType::Folder => "Folder",
+                        ProjectType::Idea => "Idea",
+                        ProjectType::GitHub => "GitHub",
+                        ProjectType::GitLab => "GitLab",
+                        ProjectType::Obsidian => "Obsidian",
+                    }
+                    .to_string(),
+                );
+                if !p.description.is_empty() {
+                    entry["description"] = serde_json::Value::String(p.description.clone());
+                }
+                if !p.tech_stack.is_empty() {
+                    entry["tech_stack"] = serde_json::json!(p.tech_stack);
+                }
+                if !p.tags.is_empty() {
+                    entry["tags"] = serde_json::json!(p.tags);
+                }
+                if let Some(branch) = &p.git_branch {
+                    entry["git_branch"] = serde_json::Value::String(branch.clone());
+                }
+                if let Some(remote) = &p.remote_url {
+                    entry["remote_url"] = serde_json::Value::String(remote.clone());
+                }
+            }
+            entry
+        })
+        .collect();
+    serde_json::json!({
+        "generated_at": chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+        "count": entries.len(),
+        "active_projects": entries,
+    })
+}
+
+/// Write the active-list JSON snapshot. Atomic via the same
+/// `<sibling>/.<name>.tmp` + rename dance the project snapshot uses,
+/// so a Hermes read can't observe a half-written file even when the
+/// CLI is invoked in a tight loop.
+fn write_active_export(path: &Path, payload: &serde_json::Value) -> Result<(), String> {
+    let json = serde_json::to_string_pretty(payload)
+        .map_err(|e| format!("serialize active export: {}", e))?;
+    let tmp = project::tmp_path_for(path);
+    std::fs::write(&tmp, &json).map_err(|e| format!("write tmp {}: {}", tmp.display(), e))?;
+    std::fs::rename(&tmp, path).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        format!("rename {} → {}: {}", tmp.display(), path.display(), e)
+    })?;
+    Ok(())
+}
+
+/// Read all projects, snapshot the active set, write the JSON export.
+/// Centralised so every mutation path (add/remove/export) goes through
+/// the same code — no chance of one path forgetting to refresh the
+/// snapshot.
+fn refresh_active_export(conn: &rusqlite::Connection, export_path: &Path) -> Result<usize, String> {
+    let active = db::list_active(conn)?;
+    let projects = db::load_all_projects(conn).unwrap_or_default();
+    let lookup: std::collections::HashMap<String, Project> = projects
+        .into_iter()
+        .map(|p| (p.path.trim_end_matches('/').to_string(), p))
+        .collect();
+    let payload = build_active_export(&active, &lookup);
+    write_active_export(export_path, &payload)?;
+    Ok(active.len())
+}
+
+/// Tab-separated row for `mercator active list` text output. Columns:
+/// activated_at, path, name (or "-"), note (or "-"). Empty fields are
+/// rendered as `-` so column counts stay constant for `awk` consumers.
+fn format_active_row(
+    a: &db::ActiveProject,
+    project_lookup: &std::collections::HashMap<String, Project>,
+) -> String {
+    let name = project_lookup
+        .get(a.path.trim_end_matches('/'))
+        .map(|p| p.name.as_str())
+        .unwrap_or("-");
+    let note = a.note.as_deref().unwrap_or("-");
+    format!("{}\t{}\t{}\t{}", a.activated_at, a.path, name, note)
+}
+
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
@@ -1108,6 +1285,7 @@ async fn main() {
             project_type,
             tag,
             tech,
+            active,
             format,
         } => {
             let conn = match db::open(&db_path) {
@@ -1121,6 +1299,7 @@ async fn main() {
                 project_type,
                 tag,
                 tech,
+                active,
             };
             let projects = match db::list_projects(&conn, &filter) {
                 Ok(p) => p,
@@ -1140,6 +1319,103 @@ async fn main() {
                 }
             }
             eprintln!("\n{} projects", projects.len());
+        }
+        Commands::Active {
+            action,
+            db: db_path,
+            export,
+        } => {
+            let conn = match db::open(&db_path) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("Error: open db {}: {}", db_path.display(), e);
+                    std::process::exit(1);
+                }
+            };
+            let export_path = export.unwrap_or_else(|| default_active_export_path(&db_path));
+
+            // Path normalisation: trim trailing slash so `/foo/` and
+            // `/foo` collapse to the same DB row. Canonicalisation is
+            // intentionally NOT applied — we want activations to work
+            // before a path exists on disk (e.g. about to clone).
+            let normalize =
+                |p: &Path| -> String { p.to_string_lossy().trim_end_matches('/').to_string() };
+
+            match action {
+                ActiveCommand::Add { path, note } => {
+                    let key = normalize(&path);
+                    if key.is_empty() {
+                        eprintln!("Error: path is empty");
+                        std::process::exit(1);
+                    }
+                    match db::add_active(&conn, &key, note.as_deref()) {
+                        Ok(true) => println!("added {}", key),
+                        Ok(false) => println!("updated {}", key),
+                        Err(e) => {
+                            eprintln!("Error: {}", e);
+                            std::process::exit(1);
+                        }
+                    }
+                    match refresh_active_export(&conn, &export_path) {
+                        Ok(n) => eprintln!("wrote {} ({} active)", export_path.display(), n),
+                        Err(e) => eprintln!("Warning: export failed: {}", e),
+                    }
+                }
+                ActiveCommand::Remove { path } => {
+                    let key = normalize(&path);
+                    match db::remove_active(&conn, &key) {
+                        Ok(true) => println!("removed {}", key),
+                        Ok(false) => {
+                            eprintln!("Warning: {} was not on the active list", key);
+                        }
+                        Err(e) => {
+                            eprintln!("Error: {}", e);
+                            std::process::exit(1);
+                        }
+                    }
+                    match refresh_active_export(&conn, &export_path) {
+                        Ok(n) => eprintln!("wrote {} ({} active)", export_path.display(), n),
+                        Err(e) => eprintln!("Warning: export failed: {}", e),
+                    }
+                }
+                ActiveCommand::List { format } => {
+                    let active = match db::list_active(&conn) {
+                        Ok(a) => a,
+                        Err(e) => {
+                            eprintln!("Error: {}", e);
+                            std::process::exit(1);
+                        }
+                    };
+                    let projects = db::load_all_projects(&conn).unwrap_or_default();
+                    let lookup: std::collections::HashMap<String, Project> = projects
+                        .into_iter()
+                        .map(|p| (p.path.trim_end_matches('/').to_string(), p))
+                        .collect();
+                    match format {
+                        OutputFormat::Text => {
+                            for a in &active {
+                                println!("{}", format_active_row(a, &lookup));
+                            }
+                        }
+                        OutputFormat::Json => {
+                            let payload = build_active_export(&active, &lookup);
+                            println!(
+                                "{}",
+                                serde_json::to_string_pretty(&payload)
+                                    .expect("active export is always serializable")
+                            );
+                        }
+                    }
+                    eprintln!("\n{} active", active.len());
+                }
+                ActiveCommand::Export => match refresh_active_export(&conn, &export_path) {
+                    Ok(n) => println!("wrote {} ({} active)", export_path.display(), n),
+                    Err(e) => {
+                        eprintln!("Error: {}", e);
+                        std::process::exit(1);
+                    }
+                },
+            }
         }
         Commands::Search {
             query,
@@ -1234,9 +1510,10 @@ async fn main() {
             let purged_sidecar = db::purged_sidecar_for_map(&map_file);
             match db::import_from_json(&mut conn, &map_file, Some(&purged_sidecar)) {
                 Ok(stats) => eprintln!(
-                    "DB ready: {} projects, {} purged paths in {} ({} new, {} updated this run)",
+                    "DB ready: {} projects, {} purged, {} active in {} ({} new, {} updated this run)",
                     db::count_projects(&conn).unwrap_or(0),
                     db::count_purged(&conn).unwrap_or(0),
+                    db::count_active(&conn).unwrap_or(0),
                     db_path.display(),
                     stats.projects_inserted,
                     stats.projects_updated,
@@ -2493,5 +2770,133 @@ mod tests {
         assert!(json.contains("\"gitBranch\""));
         assert!(!json.contains("\"tech_stack\""));
         assert!(!json.contains("\"remote_url\""));
+    }
+
+    // ── active export helpers ──────────────────────────────────────────
+
+    fn sample_project_for_active(name: &str, path: &str) -> Project {
+        Project {
+            name: name.into(),
+            path: path.into(),
+            description: format!("{} description", name),
+            project_type: ProjectType::Git,
+            last_modified: None,
+            git_branch: Some("master".into()),
+            last_commit: None,
+            git_status: None,
+            tech_stack: vec!["Rust".into()],
+            remote_url: Some("https://example.test/repo".into()),
+            agent_used: None,
+            obsidian_url: None,
+            obsidian_note_path: None,
+            tags: vec!["cli".into()],
+        }
+    }
+
+    #[test]
+    fn default_active_export_path_sits_next_to_db() {
+        assert_eq!(
+            default_active_export_path(Path::new("/tmp/x/mercator.db")),
+            PathBuf::from("/tmp/x/active-projects.json"),
+        );
+        assert_eq!(
+            default_active_export_path(Path::new("mercator.db")),
+            PathBuf::from("active-projects.json"),
+        );
+    }
+
+    #[test]
+    fn build_active_export_enriches_surveyed_paths_only() {
+        // alpha is surveyed → enriched. ghost is active-only → bare.
+        let active = vec![
+            db::ActiveProject {
+                path: "/tmp/alpha".into(),
+                activated_at: "2026-05-01T00:00:00.000Z".into(),
+                note: Some("planning v2".into()),
+            },
+            db::ActiveProject {
+                path: "/tmp/ghost".into(),
+                activated_at: "2026-05-02T00:00:00.000Z".into(),
+                note: None,
+            },
+        ];
+        let mut lookup = std::collections::HashMap::new();
+        lookup.insert(
+            "/tmp/alpha".to_string(),
+            sample_project_for_active("alpha", "/tmp/alpha"),
+        );
+
+        let payload = build_active_export(&active, &lookup);
+        assert_eq!(payload["count"], 2);
+        let entries = payload["active_projects"].as_array().unwrap();
+        assert_eq!(entries.len(), 2);
+
+        // First entry: alpha — enriched with project metadata.
+        assert_eq!(entries[0]["path"], "/tmp/alpha");
+        assert_eq!(entries[0]["name"], "alpha");
+        assert_eq!(entries[0]["type"], "Git");
+        assert_eq!(entries[0]["description"], "alpha description");
+        assert_eq!(entries[0]["note"], "planning v2");
+        assert_eq!(entries[0]["tech_stack"][0], "Rust");
+        assert_eq!(entries[0]["tags"][0], "cli");
+        assert_eq!(entries[0]["git_branch"], "master");
+
+        // Second entry: ghost — only the load-bearing fields, no enrichment
+        // and no note (Option::None is dropped from the JSON shape).
+        assert_eq!(entries[1]["path"], "/tmp/ghost");
+        assert!(entries[1].get("name").is_none());
+        assert!(entries[1].get("note").is_none());
+        assert!(entries[1].get("description").is_none());
+    }
+
+    #[test]
+    fn build_active_export_trims_trailing_slash_when_joining_lookup() {
+        // Regression guard: active rows are stored without a trailing
+        // slash, but the projects table may have either form. Trim
+        // both sides at lookup so enrichment survives the mismatch.
+        let active = vec![db::ActiveProject {
+            path: "/tmp/alpha".into(),
+            activated_at: "2026-05-01T00:00:00.000Z".into(),
+            note: None,
+        }];
+        let mut lookup = std::collections::HashMap::new();
+        let mut p = sample_project_for_active("alpha", "/tmp/alpha/");
+        p.path = "/tmp/alpha/".into();
+        lookup.insert("/tmp/alpha".to_string(), p);
+
+        let payload = build_active_export(&active, &lookup);
+        let entries = payload["active_projects"].as_array().unwrap();
+        assert_eq!(entries[0]["name"], "alpha");
+    }
+
+    #[test]
+    fn format_active_row_renders_dashes_for_missing_fields() {
+        let a = db::ActiveProject {
+            path: "/tmp/ghost".into(),
+            activated_at: "2026-05-01T00:00:00.000Z".into(),
+            note: None,
+        };
+        let lookup = std::collections::HashMap::new();
+        let row = format_active_row(&a, &lookup);
+        let cols: Vec<&str> = row.split('\t').collect();
+        assert_eq!(cols.len(), 4);
+        assert_eq!(cols[0], "2026-05-01T00:00:00.000Z");
+        assert_eq!(cols[1], "/tmp/ghost");
+        assert_eq!(cols[2], "-");
+        assert_eq!(cols[3], "-");
+    }
+
+    #[test]
+    fn write_active_export_writes_atomically() {
+        // Sibling .tmp must not survive the rename — same invariant as
+        // save_map. Pure filesystem check.
+        let dir = std::env::temp_dir().join(format!("mercator-active-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("active-projects.json");
+        let payload = serde_json::json!({"active_projects": [], "count": 0});
+        write_active_export(&target, &payload).unwrap();
+        assert!(target.exists());
+        assert!(!project::tmp_path_for(&target).exists());
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

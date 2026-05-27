@@ -1,14 +1,16 @@
 # Mercator — Current State
 
-**Last updated:** 2026-05-04
+**Last updated:** 2026-05-27
 **Latest tag:** v0.1.x (master)
-**Test count:** 97 unit tests, all gated by CI
+**Test count:** 126 unit tests, all gated by CI
 
 This is the *living state* doc. [GOALS.md](../GOALS.md) is the long-term direction; [CLAUDE.md](../CLAUDE.md) is the operator's manual; this is "where are we right now." If you're picking up the project after time away, read this first.
 
 ---
 
 ## What just shipped
+
+The session ending 2026-05-27 added a first-class **active set** — a path the user is currently working on, stored in `active_projects` (schema v3), managed via `mercator active add/remove/list/export`, and auto-exported to `active-projects.json` for Hermes (or any session-loader) to consume on each session start. The active set is *orthogonal* to surveyed state: it survives re-surveys, and a path can be activated before it's surveyed (and remains in the snapshot, just without enrichment). `mercator list --active` filters the existing project list to active projects only.
 
 The session ending 2026-05-04 closed three large issues:
 
@@ -37,8 +39,11 @@ mercator.db
 ├── project_tech        -- M2M
 ├── obsidian_links      -- 1:1, optional, projects↔Obsidian URI
 ├── purged              -- blocklist; survives surveys
+├── active_projects     -- "currently working on" set; survives surveys; path-keyed (schema v3)
 └── projects_fts        -- FTS5 virtual table over name + description + tags
 ```
+
+`active_projects` is path-keyed with no FK to `projects` for the same reason `purged` is: re-survey runs replace the project rows but must not blow away orthogonal state. A path can also be activated before it's surveyed — `list_active` returns the raw set, `list_projects` with `active=true` filters to only the rows that exist in both tables.
 
 **Legacy store: `mercator_map.json`** (still written by `mercator survey` as a backup snapshot, no longer read by the dashboard except as a fallback when the DB read errors). `mercator_purged.json` is **no longer written** — the `purged` table superseded it.
 
@@ -55,8 +60,12 @@ mercator.db
 | `mercator survey <paths...> -d <db> -o <map.json>` | DB blocklist | DB upsert + JSON snapshot |
 | `mercator serve -m <map> -d <db>` | DB; JSON fallback | DB only (handlers) |
 | `mercator export <out> -d <db>` | DB | Markdown files |
-| `mercator list -d <db> [--type T] [--tag T] [--tech T]` | DB | stdout (tab-separated) |
+| `mercator list -d <db> [--type T] [--tag T] [--tech T] [--active]` | DB | stdout (tab-separated) |
 | `mercator search <query> -d <db>` | DB FTS5 | stdout (tab-separated) |
+| `mercator active add <path> [--note ..]` | DB | DB + `active-projects.json` |
+| `mercator active remove <path>` | DB | DB + `active-projects.json` |
+| `mercator active list [--format text\|json]` | DB | stdout (tab-separated or JSON) |
+| `mercator active export` | DB | `active-projects.json` |
 
 `-d/--db` defaults to `mercator.db` for every command. `-o/--output` (survey) and `-m/--map-file` (serve) default to `mercator_map.json` for the migration / fallback path; you can pass `-o /dev/null` if you don't want the JSON snapshot.
 

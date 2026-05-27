@@ -98,6 +98,24 @@ CREATE VIRTUAL TABLE IF NOT EXISTS projects_fts USING fts5(
 );
 "#;
 
+/// Schema v3: the `active_projects` table — paths the user has explicitly
+/// marked as "currently working on". Path-keyed (no FK to `projects`)
+/// because:
+///
+/// - active set is orthogonal to surveyed state — `mercator survey` runs
+///   replace the project rows but must not blow away the active set
+/// - the user might activate a path that isn't surveyed yet (e.g. before
+///   the next survey picks it up)
+///
+/// Same pattern as the `purged` table.
+const SCHEMA_V3: &str = r#"
+CREATE TABLE IF NOT EXISTS active_projects (
+    path TEXT PRIMARY KEY,
+    activated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    note TEXT
+);
+"#;
+
 /// Open or create a SQLite database at `path`, apply the schema, and
 /// migrate to the latest version.
 ///
@@ -124,6 +142,12 @@ pub fn open(path: &Path) -> Result<Connection, String> {
         rebuild_fts(&conn)?;
         conn.execute_batch("PRAGMA user_version = 2;")
             .map_err(|e| format!("bump user_version to 2: {}", e))?;
+    }
+    if user_version < 3 {
+        conn.execute_batch(SCHEMA_V3)
+            .map_err(|e| format!("apply schema v3: {}", e))?;
+        conn.execute_batch("PRAGMA user_version = 3;")
+            .map_err(|e| format!("bump user_version to 3: {}", e))?;
     }
     Ok(conn)
 }
@@ -501,6 +525,84 @@ pub fn list_purged(conn: &Connection) -> Result<Vec<String>, String> {
         .map_err(|e| format!("read purged: {}", e))
 }
 
+/// One row of the `active_projects` table — a path the user has marked
+/// as currently working on, with the timestamp it was activated and an
+/// optional free-form note. The Hermes export and the `mercator active
+/// list` CLI both render this shape.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ActiveProject {
+    pub path: String,
+    pub activated_at: String,
+    pub note: Option<String>,
+}
+
+/// Mark a path as active. Idempotent: re-adding the same path refreshes
+/// `activated_at` and replaces the note. Returns `true` when a new row
+/// was inserted, `false` when an existing row was updated — same shape
+/// as `upsert_project` so callers can report "added" vs "updated".
+///
+/// Path is *not* validated against the `projects` table; the user may
+/// activate a path that hasn't been surveyed yet (orthogonal stores —
+/// see [`SCHEMA_V3`] commentary).
+pub fn add_active(conn: &Connection, path: &str, note: Option<&str>) -> Result<bool, String> {
+    let exists: bool = conn
+        .query_row(
+            "SELECT 1 FROM active_projects WHERE path = ?",
+            params![path],
+            |_| Ok(true),
+        )
+        .unwrap_or(false);
+    conn.execute(
+        "INSERT INTO active_projects(path, activated_at, note)
+         VALUES (?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), ?)
+         ON CONFLICT(path) DO UPDATE SET
+            activated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+            note = excluded.note",
+        params![path, note],
+    )
+    .map_err(|e| format!("upsert active({}): {}", path, e))?;
+    Ok(!exists)
+}
+
+/// Remove a path from the active list. Returns `true` if a row was
+/// actually removed (i.e. the path was previously active).
+pub fn remove_active(conn: &Connection, path: &str) -> Result<bool, String> {
+    conn.execute("DELETE FROM active_projects WHERE path = ?", params![path])
+        .map(|n| n == 1)
+        .map_err(|e| format!("delete active({}): {}", path, e))
+}
+
+/// List active paths sorted by `activated_at` descending — most recent
+/// first, which matches the natural "what am I working on right now"
+/// reading order.
+pub fn list_active(conn: &Connection) -> Result<Vec<ActiveProject>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT path, activated_at, note FROM active_projects
+             ORDER BY activated_at DESC, path",
+        )
+        .map_err(|e| format!("prepare list_active: {}", e))?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok(ActiveProject {
+                path: r.get(0)?,
+                activated_at: r.get(1)?,
+                note: r.get(2)?,
+            })
+        })
+        .map_err(|e| format!("query active: {}", e))?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("read active: {}", e))
+}
+
+pub fn count_active(conn: &Connection) -> Result<u64, String> {
+    conn.query_row("SELECT COUNT(*) FROM active_projects", [], |r| {
+        r.get::<_, i64>(0)
+    })
+    .map(|n| n as u64)
+    .map_err(|e| format!("count active: {}", e))
+}
+
 const PROJECT_COLUMNS: &str =
     "p.id, p.path, p.name, p.description, p.project_type, p.last_modified,
             p.git_branch, p.last_commit, p.git_status, p.remote_url, p.agent_used";
@@ -642,6 +744,13 @@ pub struct ListFilter {
     pub project_type: Option<String>,
     pub tag: Option<String>,
     pub tech: Option<String>,
+    /// When true, restrict to paths present in `active_projects`. The
+    /// orthogonal-store design (see [`SCHEMA_V3`]) means a path can be
+    /// active without yet being surveyed — those paths are *not*
+    /// returned here because `list_projects` only knows how to hydrate
+    /// rows that exist in the `projects` table. Use `list_active` to
+    /// see the raw active set including not-yet-surveyed paths.
+    pub active: bool,
 }
 
 /// Filtered project list (no FTS, just SQL filters). Used by
@@ -668,6 +777,9 @@ pub fn list_projects(conn: &Connection, filter: &ListFilter) -> Result<Vec<Proje
                 .into(),
         );
         binds.push(tech.clone());
+    }
+    if filter.active {
+        clauses.push("p.path IN (SELECT path FROM active_projects)".into());
     }
     let where_sql = if clauses.is_empty() {
         String::new()
@@ -729,7 +841,7 @@ mod tests {
         let v: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 2);
+        assert_eq!(v, 3);
         let names: Vec<String> = conn
             .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
             .unwrap()
@@ -738,6 +850,7 @@ mod tests {
             .collect::<Result<_, _>>()
             .unwrap();
         for expected in [
+            "active_projects",
             "obsidian_links",
             "project_tags",
             "project_tech",
@@ -1015,7 +1128,9 @@ mod tests {
         let v: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 2);
+        // v3 supersedes v2 — the FTS table is still created by the v2
+        // migration step, this test just checks the artefact survives.
+        assert_eq!(v, 3);
         let exists: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='projects_fts'",
@@ -1222,12 +1337,13 @@ mod tests {
             .unwrap();
         }
 
-        // Re-open via the public API — this should run the v2 migration.
+        // Re-open via the public API — this should run v2 (rebuild FTS)
+        // and v3 (active_projects) in sequence, leaving user_version at 3.
         let conn = open(&path).unwrap();
         assert_eq!(
             conn.query_row::<i64, _, _>("PRAGMA user_version", [], |r| r.get(0))
                 .unwrap(),
-            2
+            3
         );
         let hits = search_projects(&conn, "v1").unwrap();
         assert_eq!(hits.len(), 1);
@@ -1250,5 +1366,178 @@ mod tests {
             purged_sidecar_for_map(Path::new("map.json")),
             PathBuf::from("mercator_purged.json"),
         );
+    }
+
+    // ── active_projects (schema v3) ────────────────────────────────────
+
+    #[test]
+    fn add_active_inserts_then_updates_on_replay() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = open(&dir.path().join("db.sqlite")).unwrap();
+        assert_eq!(count_active(&conn).unwrap(), 0);
+
+        let was_new = add_active(&conn, "/tmp/alpha", Some("first note")).unwrap();
+        assert!(was_new, "first add should report newly inserted");
+        assert_eq!(count_active(&conn).unwrap(), 1);
+
+        // Re-adding the same path replaces the note and refreshes the timestamp.
+        let was_new_again = add_active(&conn, "/tmp/alpha", Some("second note")).unwrap();
+        assert!(
+            !was_new_again,
+            "re-add of existing path should report update"
+        );
+        assert_eq!(count_active(&conn).unwrap(), 1);
+
+        let rows = list_active(&conn).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].path, "/tmp/alpha");
+        assert_eq!(rows[0].note.as_deref(), Some("second note"));
+    }
+
+    #[test]
+    fn add_active_accepts_none_note() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = open(&dir.path().join("db.sqlite")).unwrap();
+        add_active(&conn, "/tmp/alpha", None).unwrap();
+        let rows = list_active(&conn).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].note, None);
+    }
+
+    #[test]
+    fn remove_active_reports_presence() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = open(&dir.path().join("db.sqlite")).unwrap();
+        add_active(&conn, "/tmp/alpha", None).unwrap();
+        assert!(remove_active(&conn, "/tmp/alpha").unwrap());
+        // Idempotent — removing again returns false.
+        assert!(!remove_active(&conn, "/tmp/alpha").unwrap());
+        assert_eq!(count_active(&conn).unwrap(), 0);
+    }
+
+    #[test]
+    fn list_active_orders_by_activated_at_descending() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = open(&dir.path().join("db.sqlite")).unwrap();
+        // Insert with explicit timestamps so the ordering check is deterministic.
+        conn.execute(
+            "INSERT INTO active_projects(path, activated_at, note) VALUES
+                ('/tmp/old',    '2026-01-01T00:00:00.000Z', NULL),
+                ('/tmp/mid',    '2026-03-01T00:00:00.000Z', NULL),
+                ('/tmp/newest', '2026-05-01T00:00:00.000Z', NULL)",
+            [],
+        )
+        .unwrap();
+        let rows = list_active(&conn).unwrap();
+        let paths: Vec<&str> = rows.iter().map(|r| r.path.as_str()).collect();
+        assert_eq!(paths, vec!["/tmp/newest", "/tmp/mid", "/tmp/old"]);
+    }
+
+    #[test]
+    fn list_projects_active_filter_restricts_to_active_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut conn = open(&dir.path().join("db.sqlite")).unwrap();
+        upsert_projects(
+            &mut conn,
+            &[
+                sample_project("alpha", "/tmp/alpha", ProjectType::Git),
+                sample_project("beta", "/tmp/beta", ProjectType::Git),
+                sample_project("gamma", "/tmp/gamma", ProjectType::Git),
+            ],
+        )
+        .unwrap();
+        add_active(&conn, "/tmp/alpha", None).unwrap();
+        add_active(&conn, "/tmp/gamma", Some("planning v2")).unwrap();
+
+        let active_only = list_projects(
+            &conn,
+            &ListFilter {
+                active: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let names: Vec<&str> = active_only.iter().map(|p| p.name.as_str()).collect();
+        // Path ordering preserved (alphabetical by p.path).
+        assert_eq!(names, vec!["alpha", "gamma"]);
+    }
+
+    #[test]
+    fn list_projects_active_filter_skips_unsurveyed_active_paths() {
+        // Orthogonal-store contract: a path can be active without being
+        // surveyed. list_projects only returns rows from the projects
+        // table, so unsurveyed-active paths are silently dropped here.
+        // Callers that need the raw set use list_active.
+        let dir = tempfile::tempdir().unwrap();
+        let mut conn = open(&dir.path().join("db.sqlite")).unwrap();
+        upsert_projects(
+            &mut conn,
+            &[sample_project("alpha", "/tmp/alpha", ProjectType::Git)],
+        )
+        .unwrap();
+        add_active(&conn, "/tmp/alpha", None).unwrap();
+        add_active(&conn, "/tmp/not-yet-surveyed", None).unwrap();
+
+        let listed = list_projects(
+            &conn,
+            &ListFilter {
+                active: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].path, "/tmp/alpha");
+        // But list_active sees both.
+        assert_eq!(list_active(&conn).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn active_set_survives_resurvey() {
+        // Resurvey runs upsert_projects, which must not touch active_projects.
+        // This is the load-bearing reason for the no-FK design.
+        let dir = tempfile::tempdir().unwrap();
+        let mut conn = open(&dir.path().join("db.sqlite")).unwrap();
+        upsert_projects(
+            &mut conn,
+            &[sample_project("alpha", "/tmp/alpha", ProjectType::Git)],
+        )
+        .unwrap();
+        add_active(&conn, "/tmp/alpha", Some("active during survey")).unwrap();
+        assert_eq!(count_active(&conn).unwrap(), 1);
+
+        // Re-survey the same project (e.g. periodic refresh).
+        upsert_projects(
+            &mut conn,
+            &[sample_project("alpha", "/tmp/alpha", ProjectType::Git)],
+        )
+        .unwrap();
+        assert_eq!(
+            count_active(&conn).unwrap(),
+            1,
+            "resurvey must not clobber the active set"
+        );
+    }
+
+    #[test]
+    fn v2_to_v3_migration_creates_active_table() {
+        // Build a stage-2 DB by hand (schema v1 + v2 + user_version=2),
+        // then re-open via the public API and check v3 ran.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v2.sqlite");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(SCHEMA_V1).unwrap();
+            conn.execute_batch(SCHEMA_V2).unwrap();
+            conn.execute_batch("PRAGMA user_version = 2;").unwrap();
+        }
+        let conn = open(&path).unwrap();
+        let v: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(v, 3);
+        // Table is present and usable.
+        add_active(&conn, "/tmp/x", None).unwrap();
+        assert_eq!(count_active(&conn).unwrap(), 1);
     }
 }
