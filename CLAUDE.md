@@ -57,6 +57,15 @@ cargo run -- list --type Git
 cargo run -- list --tech Rust
 cargo run -- search 'cli-tool'
 
+# list --format text is TTY-aware: an aligned, coloured table
+# (TYPE / NAME / SYNC / TECH / PATH) when run interactively, and the
+# stable tab-separated rows when piped (so awk/cut/grep keep working).
+# NO_COLOR=1 disables the ANSI styling.
+cargo run -- list                            # pretty table in a terminal
+cargo run -- list --no-git                   # only non-repos (Folder/Idea)
+cargo run -- list --no-remote                # repos/folders with no git remote
+cargo run -- list --out-of-sync              # branch ahead/behind its upstream
+
 # Mark a project as "currently working on" — auto-writes
 # active-projects.json next to the DB for Hermes to load each session.
 cargo run -- active add ~/Desktop/code/mercator --note "shipping active export"
@@ -172,4 +181,4 @@ All three must be green before merge.
 
 ---
 
-*Last updated: 2026-05-27 — added the `mercator active` CLI (active set in `active_projects` schema v3, JSON export at `active-projects.json` for Hermes session context, `list --active` filter). See [docs/STATUS.md](docs/STATUS.md) for the live snapshot.*
+*Last updated: 2026-06-19 — `mercator list` got a TTY-aware pretty table (aligned + coloured interactively, tab-separated when piped) and three "needs attention" filters: `--no-git`, `--no-remote`, `--out-of-sync`. The last is backed by per-repo ahead/behind counts (`git_ahead`/`git_behind`, schema v4) computed at survey time from the cached upstream — no `git fetch`. Previous: 2026-05-27 — added the `mercator active` CLI (active set in `active_projects` schema v3, JSON export at `active-projects.json` for Hermes session context, `list --active` filter). See [docs/STATUS.md](docs/STATUS.md) for the live snapshot.*

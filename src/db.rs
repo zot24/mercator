@@ -116,6 +116,21 @@ CREATE TABLE IF NOT EXISTS active_projects (
 );
 "#;
 
+/// Schema v4: divergence-from-upstream counts on `projects`. `git_ahead`
+/// / `git_behind` are the commits the local branch is ahead of / behind
+/// its cached upstream (computed by survey with no fetch). Both NULL for
+/// non-git projects and git repos with no remote-tracking branch, which
+/// is why `--out-of-sync` keys off `> 0` rather than `!= 0`.
+///
+/// Added via `ALTER TABLE` rather than baked into `SCHEMA_V1` so existing
+/// v1–v3 databases pick the columns up on first open of the new binary.
+/// `SCHEMA_V1` stays frozen, so a fresh DB runs this ALTER exactly once
+/// too (the migration is version-guarded).
+const SCHEMA_V4: &str = r#"
+ALTER TABLE projects ADD COLUMN git_ahead INTEGER;
+ALTER TABLE projects ADD COLUMN git_behind INTEGER;
+"#;
+
 /// Open or create a SQLite database at `path`, apply the schema, and
 /// migrate to the latest version.
 ///
@@ -148,6 +163,12 @@ pub fn open(path: &Path) -> Result<Connection, String> {
             .map_err(|e| format!("apply schema v3: {}", e))?;
         conn.execute_batch("PRAGMA user_version = 3;")
             .map_err(|e| format!("bump user_version to 3: {}", e))?;
+    }
+    if user_version < 4 {
+        conn.execute_batch(SCHEMA_V4)
+            .map_err(|e| format!("apply schema v4: {}", e))?;
+        conn.execute_batch("PRAGMA user_version = 4;")
+            .map_err(|e| format!("bump user_version to 4: {}", e))?;
     }
     Ok(conn)
 }
@@ -304,8 +325,9 @@ fn upsert_project(tx: &rusqlite::Transaction, p: &Project) -> Result<bool, Strin
     tx.execute(
         "INSERT INTO projects
             (path, name, description, project_type, last_modified, git_branch,
-             last_commit, git_status, remote_url, agent_used, last_seen)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+             last_commit, git_status, remote_url, agent_used, git_ahead,
+             git_behind, last_seen)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
          ON CONFLICT(path) DO UPDATE SET
             name = excluded.name,
             description = excluded.description,
@@ -316,6 +338,8 @@ fn upsert_project(tx: &rusqlite::Transaction, p: &Project) -> Result<bool, Strin
             git_status = excluded.git_status,
             remote_url = excluded.remote_url,
             agent_used = excluded.agent_used,
+            git_ahead = excluded.git_ahead,
+            git_behind = excluded.git_behind,
             last_seen = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')",
         params![
             p.path,
@@ -328,6 +352,8 @@ fn upsert_project(tx: &rusqlite::Transaction, p: &Project) -> Result<bool, Strin
             p.git_status,
             p.remote_url,
             p.agent_used,
+            p.ahead,
+            p.behind,
         ],
     )
     .map_err(|e| format!("upsert project {}: {}", p.path, e))?;
@@ -605,7 +631,8 @@ pub fn count_active(conn: &Connection) -> Result<u64, String> {
 
 const PROJECT_COLUMNS: &str =
     "p.id, p.path, p.name, p.description, p.project_type, p.last_modified,
-            p.git_branch, p.last_commit, p.git_status, p.remote_url, p.agent_used";
+            p.git_branch, p.last_commit, p.git_status, p.remote_url, p.agent_used,
+            p.git_ahead, p.git_behind";
 
 fn project_from_row(r: &rusqlite::Row) -> rusqlite::Result<(i64, Project)> {
     let project_type_str: String = r.get(4)?;
@@ -627,6 +654,8 @@ fn project_from_row(r: &rusqlite::Row) -> rusqlite::Result<(i64, Project)> {
             git_branch: r.get(6)?,
             last_commit: r.get(7)?,
             git_status: r.get(8)?,
+            ahead: r.get(11)?,
+            behind: r.get(12)?,
             tech_stack: vec![],
             remote_url: r.get(9)?,
             agent_used: r.get(10)?,
@@ -751,6 +780,18 @@ pub struct ListFilter {
     /// rows that exist in the `projects` table. Use `list_active` to
     /// see the raw active set including not-yet-surveyed paths.
     pub active: bool,
+    /// When true, restrict to projects that are not git repositories —
+    /// the local `Folder` / `Idea` types. Surfaces directories worth
+    /// putting under version control.
+    pub no_git: bool,
+    /// When true, restrict to projects with no git remote configured
+    /// (`remote_url` NULL or empty). Catches both plain folders and git
+    /// repos that have no `origin` — i.e. anything not pushed anywhere.
+    pub no_remote: bool,
+    /// When true, restrict to git projects whose branch has diverged
+    /// from its cached upstream (`git_ahead > 0` OR `git_behind > 0`).
+    /// Reflects the last fetch — survey does not fetch.
+    pub out_of_sync: bool,
 }
 
 /// Filtered project list (no FTS, just SQL filters). Used by
@@ -780,6 +821,15 @@ pub fn list_projects(conn: &Connection, filter: &ListFilter) -> Result<Vec<Proje
     }
     if filter.active {
         clauses.push("p.path IN (SELECT path FROM active_projects)".into());
+    }
+    if filter.no_git {
+        clauses.push("p.project_type IN ('Folder', 'Idea')".into());
+    }
+    if filter.no_remote {
+        clauses.push("(p.remote_url IS NULL OR p.remote_url = '')".into());
+    }
+    if filter.out_of_sync {
+        clauses.push("(COALESCE(p.git_ahead, 0) > 0 OR COALESCE(p.git_behind, 0) > 0)".into());
     }
     let where_sql = if clauses.is_empty() {
         String::new()
@@ -825,6 +875,8 @@ mod tests {
             git_branch: Some("master".to_string()),
             last_commit: Some("init".to_string()),
             git_status: None,
+            ahead: None,
+            behind: None,
             tech_stack: vec!["Rust".to_string(), "CLI".to_string()],
             remote_url: Some(format!("https://example.test/{name}")),
             agent_used: Some("claude".to_string()),
@@ -841,7 +893,7 @@ mod tests {
         let v: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 3);
+        assert_eq!(v, 4);
         let names: Vec<String> = conn
             .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
             .unwrap()
@@ -1128,9 +1180,9 @@ mod tests {
         let v: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        // v3 supersedes v2 — the FTS table is still created by the v2
+        // v4 supersedes v2 — the FTS table is still created by the v2
         // migration step, this test just checks the artefact survives.
-        assert_eq!(v, 3);
+        assert_eq!(v, 4);
         let exists: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='projects_fts'",
@@ -1298,6 +1350,79 @@ mod tests {
     }
 
     #[test]
+    fn list_projects_filters_no_git_no_remote_and_out_of_sync() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut conn = open(&dir.path().join("db.sqlite")).unwrap();
+
+        // A clean, in-sync git repo with a remote.
+        let synced = sample_project("synced", "/tmp/synced", ProjectType::Git);
+
+        // A git repo with no remote configured.
+        let mut no_remote = sample_project("orphan", "/tmp/orphan", ProjectType::Git);
+        no_remote.remote_url = None;
+
+        // A git repo diverged from upstream.
+        let mut diverged = sample_project("diverged", "/tmp/diverged", ProjectType::Git);
+        diverged.ahead = Some(3);
+        diverged.behind = Some(0);
+
+        // A plain folder (not a git repo, no remote).
+        let mut folder = sample_project("scratch", "/tmp/scratch", ProjectType::Folder);
+        folder.remote_url = None;
+
+        upsert_projects(&mut conn, &[synced, no_remote, diverged, folder]).unwrap();
+
+        let names = |f: &ListFilter| -> Vec<String> {
+            list_projects(&conn, f)
+                .unwrap()
+                .into_iter()
+                .map(|p| p.name)
+                .collect()
+        };
+
+        // --no-git → only the Folder.
+        assert_eq!(
+            names(&ListFilter {
+                no_git: true,
+                ..Default::default()
+            }),
+            vec!["scratch"]
+        );
+
+        // --no-remote → the remote-less git repo and the folder.
+        let mut nr = names(&ListFilter {
+            no_remote: true,
+            ..Default::default()
+        });
+        nr.sort();
+        assert_eq!(nr, vec!["orphan", "scratch"]);
+
+        // --out-of-sync → only the diverged repo (ahead > 0). NULL
+        // ahead/behind (folder, synced-at-zero) must not match.
+        assert_eq!(
+            names(&ListFilter {
+                out_of_sync: true,
+                ..Default::default()
+            }),
+            vec!["diverged"]
+        );
+    }
+
+    #[test]
+    fn upsert_round_trips_ahead_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut conn = open(&dir.path().join("db.sqlite")).unwrap();
+        let mut p = sample_project("p", "/tmp/p", ProjectType::Git);
+        p.ahead = Some(4);
+        p.behind = Some(2);
+        upsert_projects(&mut conn, &[p]).unwrap();
+        let back = load_all_projects(&conn).unwrap();
+        assert_eq!(back.len(), 1);
+        assert_eq!(back[0].ahead, Some(4));
+        assert_eq!(back[0].behind, Some(2));
+    }
+
+    #[test]
     fn v1_to_v2_migration_rebuilds_fts_from_existing_data() {
         // Simulate a stage-1 DB by creating the v1 schema and inserting a row,
         // then re-opening it and checking the FTS rebuild populated correctly.
@@ -1337,13 +1462,14 @@ mod tests {
             .unwrap();
         }
 
-        // Re-open via the public API — this should run v2 (rebuild FTS)
-        // and v3 (active_projects) in sequence, leaving user_version at 3.
+        // Re-open via the public API — this should run v2 (rebuild FTS),
+        // v3 (active_projects) and v4 (git_ahead/git_behind) in sequence,
+        // leaving user_version at 4.
         let conn = open(&path).unwrap();
         assert_eq!(
             conn.query_row::<i64, _, _>("PRAGMA user_version", [], |r| r.get(0))
                 .unwrap(),
-            3
+            4
         );
         let hits = search_projects(&conn, "v1").unwrap();
         assert_eq!(hits.len(), 1);
@@ -1535,7 +1661,8 @@ mod tests {
         let v: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 3);
+        // open() now also runs v4 (git_ahead/git_behind columns).
+        assert_eq!(v, 4);
         // Table is present and usable.
         add_active(&conn, "/tmp/x", None).unwrap();
         assert_eq!(count_active(&conn).unwrap(), 1);

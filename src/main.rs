@@ -213,7 +213,27 @@ enum Commands {
         #[arg(long)]
         active: bool,
 
-        /// Output format: `text` (default, tab-separated for shell pipelines)
+        /// Show only projects that are not git repositories (the local
+        /// Folder / Idea types) — directories worth putting under version
+        /// control. AND-combined with the other filters.
+        #[arg(long = "no-git")]
+        no_git: bool,
+
+        /// Show only projects with no git remote configured (covers both
+        /// plain folders and git repos that have no `origin` remote — i.e.
+        /// anything not pushed anywhere). AND-combined with the other filters.
+        #[arg(long = "no-remote")]
+        no_remote: bool,
+
+        /// Show only git projects whose branch has diverged from its
+        /// upstream — ahead (unpushed) and/or behind (unpulled). Reflects
+        /// the last fetch; `mercator survey` does not fetch. AND-combined
+        /// with the other filters.
+        #[arg(long = "out-of-sync")]
+        out_of_sync: bool,
+
+        /// Output format: `text` (default — an aligned table on a terminal,
+        /// tab-separated rows when piped so shell pipelines keep working)
         /// or `json` (a JSON array of full project records, matching the
         /// `/api/map` shape — feed to `jq`, scripts, or other tools).
         #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
@@ -938,22 +958,214 @@ async fn skills_api(State(state): State<AppState>) -> Json<Vec<crate::skills::Sk
 /// Columns: type, path, name, tags (comma-joined), tech (comma-joined).
 /// Stable for shell pipelines (`awk -F'\t'`, `cut -f`, `grep`).
 fn format_project_row(p: &Project) -> String {
-    let project_type = match p.project_type {
+    format!(
+        "{}\t{}\t{}\t{}\t{}",
+        project_type_label(&p.project_type),
+        p.path,
+        p.name,
+        p.tags.join(","),
+        p.tech_stack.join(","),
+    )
+}
+
+/// Human-facing label for a `ProjectType`. Same strings the tab-separated
+/// row and the JSON `type` field use, so the three surfaces stay in step.
+fn project_type_label(t: &ProjectType) -> &'static str {
+    match t {
         ProjectType::Git => "Git",
         ProjectType::Folder => "Folder",
         ProjectType::Idea => "Idea",
         ProjectType::GitHub => "GitHub",
         ProjectType::GitLab => "GitLab",
         ProjectType::Obsidian => "Obsidian",
+    }
+}
+
+// ── Pretty `--format text` table ───────────────────────────────────────
+//
+// `mercator list` / `search` default to `--format text`. On an interactive
+// terminal we render an aligned, lightly-coloured table (the old raw
+// tab-separated output read as noise once paths got long). When stdout is
+// *not* a TTY we fall back to [`format_project_row`] so existing
+// `awk` / `cut` / `grep` pipelines keep seeing the stable tab format.
+
+const C_RESET: &str = "\x1b[0m";
+const C_BOLD: &str = "\x1b[1m";
+const C_DIM: &str = "\x1b[2m";
+const C_GREEN: &str = "\x1b[32m";
+const C_YELLOW: &str = "\x1b[33m";
+const C_CYAN: &str = "\x1b[36m";
+
+/// Render the chosen output format for a project list. Text output is
+/// TTY-aware: aligned table when interactive, tab-separated rows when
+/// piped. JSON is unconditional.
+fn print_project_list(projects: &[Project], format: OutputFormat) {
+    match format {
+        OutputFormat::Json => println!("{}", format_projects_json(projects)),
+        OutputFormat::Text => {
+            use std::io::IsTerminal;
+            if std::io::stdout().is_terminal() {
+                // `NO_COLOR` (https://no-color.org) disables ANSI styling.
+                let color = std::env::var_os("NO_COLOR").is_none();
+                print!("{}", format_project_table(projects, color));
+            } else {
+                for p in projects {
+                    println!("{}", format_project_row(p));
+                }
+            }
+        }
+    }
+}
+
+/// One-cell summary of a project's relationship to its remote, plus the
+/// ANSI colour to render it in. Pure so the status vocabulary can be
+/// pinned by unit tests.
+///
+/// - non-git surfaces (Folder / Idea / Obsidian) → `—` (nothing to sync)
+/// - git with no remote configured → `no remote`
+/// - ahead / behind the cached upstream → `↑N` / `↓N` (uncommitted tree
+///   adds `uncommitted`)
+/// - clean and level with upstream → `✓ synced`
+fn sync_label(p: &Project) -> (String, &'static str) {
+    match p.project_type {
+        ProjectType::Folder | ProjectType::Idea | ProjectType::Obsidian => {
+            return ("—".to_string(), C_DIM);
+        }
+        ProjectType::Git | ProjectType::GitHub | ProjectType::GitLab => {}
+    }
+
+    let has_remote = p
+        .remote_url
+        .as_deref()
+        .map(|s| !s.is_empty())
+        .unwrap_or(false);
+    if !has_remote {
+        return ("no remote".to_string(), C_YELLOW);
+    }
+
+    let mut parts: Vec<String> = Vec::new();
+    if p.ahead.unwrap_or(0) > 0 {
+        parts.push(format!("↑{}", p.ahead.unwrap_or(0)));
+    }
+    if p.behind.unwrap_or(0) > 0 {
+        parts.push(format!("↓{}", p.behind.unwrap_or(0)));
+    }
+    if p.git_status.as_deref() == Some("uncommitted") {
+        parts.push("uncommitted".to_string());
+    }
+
+    if parts.is_empty() {
+        ("✓ synced".to_string(), C_GREEN)
+    } else {
+        (parts.join(" "), C_YELLOW)
+    }
+}
+
+/// Replace a leading `$HOME` with `~` so the PATH column stays narrow.
+fn abbreviate_home(path: &str) -> String {
+    if let Some(home) = dirs::home_dir() {
+        let home = home.to_string_lossy();
+        if !home.is_empty() {
+            if let Some(rest) = path.strip_prefix(home.as_ref()) {
+                return format!("~{}", rest);
+            }
+        }
+    }
+    path.to_string()
+}
+
+/// Left-pad `s` to `width` display columns (counted in `char`s, which is
+/// what the std formatter pads by).
+fn pad(s: &str, width: usize) -> String {
+    format!("{:<width$}", s, width = width)
+}
+
+/// Wrap `s` in an ANSI colour when `color` is on, otherwise return it as-is.
+fn paint(s: &str, code: &str, color: bool) -> String {
+    if color {
+        format!("{code}{s}{C_RESET}")
+    } else {
+        s.to_string()
+    }
+}
+
+/// Render an aligned table of projects: `TYPE  NAME  SYNC  TECH  PATH`.
+/// PATH comes last because it's the widest/raggedest column, so its length
+/// can't push the others out of alignment. Returns `""` for an empty list
+/// (the caller already prints the count to stderr).
+fn format_project_table(projects: &[Project], color: bool) -> String {
+    if projects.is_empty() {
+        return String::new();
+    }
+
+    struct Row {
+        ptype: String,
+        name: String,
+        sync: String,
+        sync_color: &'static str,
+        tech: String,
+        path: String,
+    }
+
+    let rows: Vec<Row> = projects
+        .iter()
+        .map(|p| {
+            let (sync, sync_color) = sync_label(p);
+            Row {
+                ptype: project_type_label(&p.project_type).to_string(),
+                name: p.name.clone(),
+                sync,
+                sync_color,
+                tech: if p.tech_stack.is_empty() {
+                    "—".to_string()
+                } else {
+                    p.tech_stack.join(", ")
+                },
+                path: abbreviate_home(&p.path),
+            }
+        })
+        .collect();
+
+    let w = |header: &str, cells: &dyn Fn(&Row) -> &str| -> usize {
+        rows.iter()
+            .map(|r| cells(r).chars().count())
+            .max()
+            .unwrap_or(0)
+            .max(header.chars().count())
     };
-    format!(
-        "{}\t{}\t{}\t{}\t{}",
-        project_type,
-        p.path,
-        p.name,
-        p.tags.join(","),
-        p.tech_stack.join(","),
-    )
+    let w_type = w("TYPE", &|r| r.ptype.as_str());
+    let w_name = w("NAME", &|r| r.name.as_str());
+    let w_sync = w("SYNC", &|r| r.sync.as_str());
+    let w_tech = w("TECH", &|r| r.tech.as_str());
+
+    let mut out = String::new();
+    let header = format!(
+        "{}  {}  {}  {}  {}",
+        pad("TYPE", w_type),
+        pad("NAME", w_name),
+        pad("SYNC", w_sync),
+        pad("TECH", w_tech),
+        "PATH",
+    );
+    out.push_str(&paint(&header, C_BOLD, color));
+    out.push('\n');
+
+    for r in &rows {
+        let type_color = if matches!(r.ptype.as_str(), "Folder" | "Idea" | "Obsidian") {
+            C_DIM
+        } else {
+            C_CYAN
+        };
+        out.push_str(&format!(
+            "{}  {}  {}  {}  {}\n",
+            paint(&pad(&r.ptype, w_type), type_color, color),
+            pad(&r.name, w_name),
+            paint(&pad(&r.sync, w_sync), r.sync_color, color),
+            paint(&pad(&r.tech, w_tech), C_DIM, color),
+            paint(&r.path, C_DIM, color),
+        ));
+    }
+    out
 }
 
 /// Pretty-printed JSON array of full `Project` records for `--format json`.
@@ -1286,6 +1498,9 @@ async fn main() {
             tag,
             tech,
             active,
+            no_git,
+            no_remote,
+            out_of_sync,
             format,
         } => {
             let conn = match db::open(&db_path) {
@@ -1300,6 +1515,9 @@ async fn main() {
                 tag,
                 tech,
                 active,
+                no_git,
+                no_remote,
+                out_of_sync,
             };
             let projects = match db::list_projects(&conn, &filter) {
                 Ok(p) => p,
@@ -1308,16 +1526,7 @@ async fn main() {
                     std::process::exit(1);
                 }
             };
-            match format {
-                OutputFormat::Text => {
-                    for p in &projects {
-                        println!("{}", format_project_row(p));
-                    }
-                }
-                OutputFormat::Json => {
-                    println!("{}", format_projects_json(&projects));
-                }
-            }
+            print_project_list(&projects, format);
             eprintln!("\n{} projects", projects.len());
         }
         Commands::Active {
@@ -1436,16 +1645,7 @@ async fn main() {
                     std::process::exit(1);
                 }
             };
-            match format {
-                OutputFormat::Text => {
-                    for p in &projects {
-                        println!("{}", format_project_row(p));
-                    }
-                }
-                OutputFormat::Json => {
-                    println!("{}", format_projects_json(&projects));
-                }
-            }
+            print_project_list(&projects, format);
             eprintln!("\n{} projects matched {:?}", projects.len(), query);
         }
         Commands::Export {
@@ -1674,8 +1874,8 @@ mod tests {
     use crate::sources::{
         deduplicate_projects, detect_agent, detect_github_tech_stack, detect_gitlab_tech_stack,
         detect_tech_stack, format_api_error, link_obsidian_notes, normalize_name,
-        normalize_remote_url, parse_link_next, scan_obsidian_vault, survey_projects, GitHubRepo,
-        GitLabRepo,
+        normalize_remote_url, parse_ahead_behind, parse_link_next, scan_obsidian_vault,
+        survey_projects, GitHubRepo, GitLabRepo,
     };
     use crate::tags_graph::domain_keywords;
 
@@ -1740,6 +1940,87 @@ mod tests {
             normalize_remote_url("ssh://git@github.com/zot24/mercator.git"),
             "github.com/zot24/mercator"
         );
+    }
+
+    // ── parse_ahead_behind ─────────────────────────────────────────────
+
+    #[test]
+    fn parse_ahead_behind_maps_left_right_to_ahead_behind() {
+        // `git rev-list --left-right --count @{u}...HEAD` prints
+        // "<behind>\t<ahead>" — upstream-only commits first, then
+        // local-only. The helper flips that to (ahead, behind).
+        assert_eq!(parse_ahead_behind("1\t2"), Some((2, 1)));
+    }
+
+    #[test]
+    fn parse_ahead_behind_handles_in_sync() {
+        assert_eq!(parse_ahead_behind("0\t0"), Some((0, 0)));
+    }
+
+    #[test]
+    fn parse_ahead_behind_rejects_empty_and_garbage() {
+        // git emits nothing when there's no upstream to compare against.
+        assert_eq!(parse_ahead_behind(""), None);
+        assert_eq!(parse_ahead_behind("nope"), None);
+        assert_eq!(parse_ahead_behind("1"), None);
+    }
+
+    // ── sync_label / format_project_table ──────────────────────────────
+
+    fn git_project(name: &str, remote: Option<&str>) -> Project {
+        project(name, ProjectType::Git, remote)
+    }
+
+    #[test]
+    fn sync_label_marks_non_git_as_dash() {
+        let p = project("notes", ProjectType::Folder, None);
+        assert_eq!(sync_label(&p).0, "—");
+    }
+
+    #[test]
+    fn sync_label_flags_missing_remote() {
+        let p = git_project("local-only", None);
+        assert_eq!(sync_label(&p).0, "no remote");
+    }
+
+    #[test]
+    fn sync_label_shows_ahead_behind_and_dirty() {
+        let mut p = git_project("busy", Some("git@github.com:zot24/busy.git"));
+        p.ahead = Some(2);
+        p.behind = Some(1);
+        p.git_status = Some("uncommitted".to_string());
+        assert_eq!(sync_label(&p).0, "↑2 ↓1 uncommitted");
+    }
+
+    #[test]
+    fn sync_label_reports_clean_synced() {
+        let mut p = git_project("tidy", Some("git@github.com:zot24/tidy.git"));
+        p.ahead = Some(0);
+        p.behind = Some(0);
+        assert_eq!(sync_label(&p).0, "✓ synced");
+    }
+
+    #[test]
+    fn format_project_table_aligns_columns_without_color() {
+        let projects = vec![
+            git_project("a", Some("git@github.com:z/a.git")),
+            project("longer-folder-name", ProjectType::Folder, None),
+        ];
+        let table = format_project_table(&projects, false);
+        let lines: Vec<&str> = table.lines().collect();
+        // Header + one row per project, no ANSI escapes when color is off.
+        assert_eq!(lines.len(), 3);
+        assert!(lines[0].starts_with("TYPE"));
+        assert!(!table.contains('\x1b'));
+        // The TYPE column is padded to the header width (4) at minimum, so
+        // "Git" is followed by spaces before the gap to NAME.
+        assert!(table.contains("Git "));
+        assert!(table.contains("longer-folder-name"));
+    }
+
+    #[test]
+    fn format_project_table_empty_is_blank() {
+        assert_eq!(format_project_table(&[], true), "");
     }
 
     // ── normalize_name ─────────────────────────────────────────────────
@@ -1860,6 +2141,8 @@ mod tests {
             git_branch: None,
             last_commit: None,
             git_status: None,
+            ahead: None,
+            behind: None,
             tech_stack: vec![],
             remote_url: remote.map(|s| s.to_string()),
             agent_used: None,
@@ -2784,6 +3067,8 @@ mod tests {
             git_branch: Some("master".into()),
             last_commit: None,
             git_status: None,
+            ahead: None,
+            behind: None,
             tech_stack: vec!["Rust".into()],
             remote_url: Some("https://example.test/repo".into()),
             agent_used: None,
