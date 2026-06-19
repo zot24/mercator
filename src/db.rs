@@ -131,6 +131,30 @@ ALTER TABLE projects ADD COLUMN git_ahead INTEGER;
 ALTER TABLE projects ADD COLUMN git_behind INTEGER;
 "#;
 
+/// Schema v5: the `local_tickets` table backing `POST /api/tickets` with
+/// `source = local`. Standalone, path-free state (no FK to `projects`) so
+/// a ticket can reference an unsurveyed project by slug. Timestamps use
+/// the same `strftime('%Y-%m-%dT%H:%M:%fZ', 'now')` shape as `last_seen`
+/// on `projects` — see [`upsert_project`] for why we let SQLite mint them.
+const SCHEMA_V5: &str = r#"
+CREATE TABLE IF NOT EXISTS local_tickets (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source TEXT NOT NULL,
+    repo TEXT,
+    project TEXT,
+    title TEXT NOT NULL,
+    body TEXT,
+    priority TEXT NOT NULL DEFAULT 'medium',
+    status TEXT NOT NULL DEFAULT 'open',
+    labels_csv TEXT,
+    assignee TEXT,
+    external_key TEXT,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    closed_at TEXT
+);
+"#;
+
 /// Open or create a SQLite database at `path`, apply the schema, and
 /// migrate to the latest version.
 ///
@@ -169,6 +193,12 @@ pub fn open(path: &Path) -> Result<Connection, String> {
             .map_err(|e| format!("apply schema v4: {}", e))?;
         conn.execute_batch("PRAGMA user_version = 4;")
             .map_err(|e| format!("bump user_version to 4: {}", e))?;
+    }
+    if user_version < 5 {
+        conn.execute_batch(SCHEMA_V5)
+            .map_err(|e| format!("apply schema v5: {}", e))?;
+        conn.execute_batch("PRAGMA user_version = 5;")
+            .map_err(|e| format!("bump user_version to 5: {}", e))?;
     }
     Ok(conn)
 }
@@ -893,7 +923,7 @@ mod tests {
         let v: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 4);
+        assert_eq!(v, 5);
         let names: Vec<String> = conn
             .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
             .unwrap()
@@ -903,6 +933,7 @@ mod tests {
             .unwrap();
         for expected in [
             "active_projects",
+            "local_tickets",
             "obsidian_links",
             "project_tags",
             "project_tech",
@@ -917,6 +948,33 @@ mod tests {
                 "missing table {expected} in {names:?}"
             );
         }
+    }
+
+    #[test]
+    fn schema_v5_creates_local_tickets_with_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = open(&dir.path().join("db.sqlite")).unwrap();
+        // The migration owns the table — a bare insert relying on column
+        // defaults must succeed.
+        conn.execute(
+            "INSERT INTO local_tickets (source, title) VALUES ('local', 'hello')",
+            [],
+        )
+        .unwrap();
+        let (priority, status, created): (String, String, String) = conn
+            .query_row(
+                "SELECT priority, status, created_at FROM local_tickets WHERE title = 'hello'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(priority, "medium");
+        assert_eq!(status, "open");
+        // strftime mints the same ISO-ish shape as `projects.last_seen`.
+        assert!(
+            created.contains('T') && created.ends_with('Z'),
+            "unexpected created_at {created:?}"
+        );
     }
 
     #[test]
@@ -1180,9 +1238,10 @@ mod tests {
         let v: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        // v4 supersedes v2 — the FTS table is still created by the v2
-        // migration step, this test just checks the artefact survives.
-        assert_eq!(v, 4);
+        // Later migrations (v3 active_projects, v4 git_ahead, v5
+        // local_tickets) supersede v2 — the FTS table created by the v2
+        // step must still survive.
+        assert_eq!(v, 5);
         let exists: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='projects_fts'",
@@ -1462,14 +1521,14 @@ mod tests {
             .unwrap();
         }
 
-        // Re-open via the public API — this should run v2 (rebuild FTS),
-        // v3 (active_projects) and v4 (git_ahead/git_behind) in sequence,
-        // leaving user_version at 4.
+        // Re-open via the public API — this runs v2 (rebuild FTS), v3
+        // (active_projects), v4 (git_ahead/git_behind) and v5
+        // (local_tickets) in sequence, leaving user_version at 5.
         let conn = open(&path).unwrap();
         assert_eq!(
             conn.query_row::<i64, _, _>("PRAGMA user_version", [], |r| r.get(0))
                 .unwrap(),
-            4
+            5
         );
         let hits = search_projects(&conn, "v1").unwrap();
         assert_eq!(hits.len(), 1);
@@ -1661,8 +1720,9 @@ mod tests {
         let v: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        // open() now also runs v4 (git_ahead/git_behind columns).
-        assert_eq!(v, 4);
+        // open() now also runs v4 (git_ahead/git_behind) and v5
+        // (local_tickets).
+        assert_eq!(v, 5);
         // Table is present and usable.
         add_active(&conn, "/tmp/x", None).unwrap();
         assert_eq!(count_active(&conn).unwrap(), 1);

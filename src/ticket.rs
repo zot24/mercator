@@ -1,7 +1,6 @@
 use crate::AppState;
 use axum::{extract::State, http::StatusCode, Json};
 use serde::{Deserialize, Serialize};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct TicketOut {
@@ -286,26 +285,8 @@ fn insert_local_ticket(
     body: &TicketCreate,
     priority: &str,
 ) -> Result<i64, String> {
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS local_tickets (\
-         id INTEGER PRIMARY KEY AUTOINCREMENT,\
-         source TEXT NOT NULL,\
-         repo TEXT,\
-         project TEXT,\
-         title TEXT NOT NULL,\
-         body TEXT,\
-         priority TEXT NOT NULL DEFAULT 'medium',\
-         status TEXT NOT NULL DEFAULT 'open',\
-         labels_csv TEXT,\
-         assignee TEXT,\
-         external_key TEXT,\
-         created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\
-         updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\
-         closed_at TEXT\
-         )",
-    )
-    .map_err(|e| format!("create table failed: {e}"))?;
-
+    // The `local_tickets` table is created by db::open()'s schema v3
+    // migration, so the handler can assume it exists.
     let labels_csv = body.labels.as_ref().map(|v| v.join(","));
     conn.execute(
         "INSERT INTO local_tickets (source, repo, project, title, body, priority, status, labels_csv, assignee) \
@@ -326,23 +307,10 @@ fn insert_local_ticket(
     Ok(conn.last_insert_rowid())
 }
 
+/// Current UTC time as an ISO 8601 string, matching the
+/// `%Y-%m-%dT%H:%M:%SZ` shape `project::format_time` uses elsewhere.
 fn now_rfc3339() -> String {
-    let dur = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default();
-    let nanos = dur.as_nanos();
-    let secs = nanos / 1_000_000_000;
-    let rem = nanos % 1_000_000_000;
-    format!(
-        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:09}Z",
-        (secs / 31_536_000) + 1970,
-        ((secs % 31_536_000) / 2_629_746) + 1, // month approx
-        ((secs % 2_629_746) / 86_400) + 1,
-        (secs % 86_400) / 3_600,
-        (secs % 3_600) / 60,
-        secs % 60,
-        rem,
-    )
+    chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string()
 }
 
 #[cfg(test)]
@@ -366,5 +334,15 @@ mod tests {
         assert_eq!(t.source, "github");
         assert_eq!(t.priority, Some("high".into()));
         assert_eq!(t.labels, Some(vec!["bug".into()]));
+    }
+
+    #[test]
+    fn now_rfc3339_is_iso_utc_seconds() {
+        // e.g. "2026-06-19T20:05:30Z" — fixed-width, Zulu, second precision.
+        let s = now_rfc3339();
+        assert_eq!(s.len(), 20, "unexpected timestamp {s:?}");
+        assert!(s.ends_with('Z'));
+        assert_eq!(&s[4..5], "-");
+        assert_eq!(&s[10..11], "T");
     }
 }
