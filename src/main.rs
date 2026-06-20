@@ -68,6 +68,7 @@ use tower_http::services::ServeDir;
 
 #[derive(Parser)]
 #[command(name = "mercator")]
+#[command(version)]
 #[command(about = "Cartography for your local projects", long_about = None)]
 struct Cli {
     #[command(subcommand)]

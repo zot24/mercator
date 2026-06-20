@@ -1,0 +1,47 @@
+name: Bump Homebrew formula
+
+# On every published GitHub release, recompute the source tarball's sha256
+# and push the new version into the Homebrew tap so `brew upgrade mercator`
+# always tracks the latest release.
+#
+# Requires a repo secret `HOMEBREW_TAP_TOKEN`: a fine-grained PAT with
+# Contents: read & write on `zot24/homebrew-tap`.
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Update formula in tap
+        env:
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          TAG: ${{ github.event.release.tag_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          VERSION="${TAG#v}"
+          TARBALL="https://github.com/${REPO}/archive/refs/tags/${TAG}.tar.gz"
+          echo "Computing sha256 for ${TARBALL}"
+          SHA=$(curl -fsSL "$TARBALL" | sha256sum | cut -d' ' -f1)
+          echo "sha256=${SHA}"
+
+          git clone "https://x-access-token:${TAP_TOKEN}@github.com/zot24/homebrew-tap.git" tap
+          cd tap
+          FORMULA="Formula/mercator.rb"
+          sed -i -E "s|^  url \".*\"|  url \"${TARBALL}\"|" "$FORMULA"
+          sed -i -E "s|^  sha256 \".*\"|  sha256 \"${SHA}\"|" "$FORMULA"
+
+          if git diff --quiet; then
+            echo "Formula already up to date; nothing to do."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "$FORMULA"
+          git commit -m "mercator ${VERSION}"
+          git push
