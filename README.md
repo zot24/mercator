@@ -132,17 +132,40 @@ the day it makes your existing project sprawl manageable.
 - Live job list with cost / tool-call / token counters
 - See [issue #21](https://github.com/zot24/mercator/issues/21) for the long-term distribution plan
 
+## Install
+
+### Homebrew (macOS / Linux)
+
+```bash
+brew install zot24/tap/mercator
+```
+
+This builds from source (needs the Rust toolchain, which Homebrew pulls in as a
+build dependency). Upgrade to the newest release any time with:
+
+```bash
+brew upgrade mercator
+```
+
+Every published release auto-updates the formula in [`zot24/homebrew-tap`](https://github.com/zot24/homebrew-tap),
+so `brew upgrade` always tracks the latest. Check what you're on with
+`mercator --version`.
+
+### From source
+
+```bash
+cargo install --git https://github.com/zot24/mercator
+# or clone + `cargo build --release` (binary at ./target/release/mercator)
+```
+
 ## Quick Start
 
 ```bash
-# Build
-cargo build --release
-
 # Scan your projects
-./target/release/mercator survey ~/code --github yourusername
+mercator survey ~/code --github yourusername
 
 # Start the dashboard
-./target/release/mercator serve --port 3000
+mercator serve --port 3000
 
 # Open http://127.0.0.1:3000
 ```

@@ -1,7 +1,12 @@
 [package]
 name = "mercator"
-version = "0.1.0"
+version = "0.5.0"
 edition = "2021"
+description = "Cartography for your local development landscape — Rust CLI + web dashboard that maps your projects across local dirs, GitHub, GitLab, and Obsidian."
+license = "MIT"
+repository = "https://github.com/zot24/mercator"
+homepage = "https://github.com/zot24/mercator"
+readme = "README.md"
 
 [features]
 default = []
