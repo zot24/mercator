@@ -36,6 +36,7 @@ mod project;
 mod skills;
 mod sources;
 mod tags_graph;
+mod ticket;
 
 #[cfg(feature = "swarm")]
 use crate::agent::AgentJob;
@@ -1771,7 +1772,8 @@ async fn main() {
                 .route("/api/project/restore", post(restore_project_api))
                 .route("/api/purged", get(purged_list_api))
                 .route("/api/project/tree", get(project_tree_api))
-                .route("/api/project/file", get(project_file_api));
+                .route("/api/project/file", get(project_file_api))
+                .route("/api/tickets", post(ticket::create_ticket));
 
             #[cfg(feature = "swarm")]
             let api = api
