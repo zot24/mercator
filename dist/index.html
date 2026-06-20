@@ -1102,7 +1102,7 @@ token = "glpat-xxxxx" # optional</pre>
     // dashboard-side preferences, not server config. Tokens migrated
     // to ~/.config/mercator/config.toml via /api/settings (#2).
     function getLocalPrefs() {
-        const defaults = { localPaths: ['/Users/anon/Desktop/code'], gitlabUrl: 'https://gitlab.com' };
+        const defaults = { localPaths: ['~/code'], gitlabUrl: 'https://gitlab.com' };
         const stored = localStorage.getItem('mercator-local-prefs');
         if (stored) return { ...defaults, ...JSON.parse(stored) };
         // Legacy: read out of the old `mercator-settings` key if present
