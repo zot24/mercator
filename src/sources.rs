@@ -28,7 +28,30 @@ fn git_command(path: &Path, args: &[&str]) -> Option<String> {
         })
 }
 
-/// Get git status for a repository
+/// Parse the output of `git rev-list --left-right --count @{u}...HEAD`.
+///
+/// Git prints two tab-separated counts: `<behind>\t<ahead>` — the number
+/// of commits the upstream has that HEAD doesn't (behind), then the
+/// number HEAD has that the upstream doesn't (ahead). Returns
+/// `(ahead, behind)`. `None` for malformed input (e.g. the empty string
+/// git emits when there is no upstream to compare against).
+///
+/// Pure so the count-direction convention can be pinned by a unit test
+/// without spawning git.
+pub fn parse_ahead_behind(out: &str) -> Option<(i64, i64)> {
+    let mut parts = out.split_whitespace();
+    let behind: i64 = parts.next()?.parse().ok()?;
+    let ahead: i64 = parts.next()?.parse().ok()?;
+    Some((ahead, behind))
+}
+
+/// Get git status for a repository.
+///
+/// Returns `(branch, last_commit, git_status, remote_url, ahead, behind)`.
+/// `ahead`/`behind` are the divergence from the **cached** upstream — no
+/// `git fetch` is run, so they reflect the remote as of the last fetch.
+/// Both are `None` when the branch has no upstream configured.
+#[allow(clippy::type_complexity)]
 fn get_git_info(
     path: &Path,
 ) -> (
@@ -36,6 +59,8 @@ fn get_git_info(
     Option<String>,
     Option<String>,
     Option<String>,
+    Option<i64>,
+    Option<i64>,
 ) {
     let branch = git_command(path, &["rev-parse", "--abbrev-ref", "HEAD"]);
     let commit = git_command(path, &["log", "-1", "--pretty=%s"]);
@@ -48,7 +73,18 @@ fn get_git_info(
         None
     };
 
-    (branch, commit, git_status, remote_url)
+    // Divergence vs the cached upstream ref. `git_command` returns `None`
+    // (non-zero exit) when there is no `@{u}`, so a repo with no
+    // remote-tracking branch falls through to `(None, None)`.
+    let (ahead, behind) = git_command(
+        path,
+        &["rev-list", "--left-right", "--count", "@{u}...HEAD"],
+    )
+    .and_then(|out| parse_ahead_behind(&out))
+    .map(|(a, b)| (Some(a), Some(b)))
+    .unwrap_or((None, None));
+
+    (branch, commit, git_status, remote_url, ahead, behind)
 }
 
 // ── HTTP error formatting + Link header parsing ────────────────────────
@@ -195,6 +231,8 @@ pub async fn fetch_github_repos(
                 git_branch: Some(repo.default_branch.unwrap_or_else(|| "main".to_string())),
                 last_commit: None,
                 git_status: None,
+                ahead: None,
+                behind: None,
                 tech_stack,
                 remote_url: Some(repo.html_url),
                 agent_used: None,
@@ -315,6 +353,8 @@ pub async fn fetch_gitlab_repos(
                 git_branch: Some(repo.default_branch.unwrap_or_else(|| "main".to_string())),
                 last_commit: None,
                 git_status: None,
+                ahead: None,
+                behind: None,
                 tech_stack,
                 remote_url: Some(repo.web_url),
                 agent_used: None,
@@ -439,10 +479,10 @@ pub fn survey_projects(root: &Path) -> Vec<Project> {
                     .and_then(|m| m.modified().ok())
                     .map(format_time);
 
-                let (git_branch, last_commit, git_status, remote_url) = if is_git {
+                let (git_branch, last_commit, git_status, remote_url, ahead, behind) = if is_git {
                     get_git_info(path)
                 } else {
-                    (None, None, None, None)
+                    (None, None, None, None, None, None)
                 };
 
                 let agent_used = detect_agent(path);
@@ -460,6 +500,8 @@ pub fn survey_projects(root: &Path) -> Vec<Project> {
                     git_branch,
                     last_commit,
                     git_status,
+                    ahead,
+                    behind,
                     tech_stack: detect_tech_stack(path),
                     remote_url,
                     agent_used,
@@ -479,6 +521,8 @@ pub fn survey_projects(root: &Path) -> Vec<Project> {
                     git_branch: None,
                     last_commit: None,
                     git_status: None,
+                    ahead: None,
+                    behind: None,
                     tech_stack: detect_tech_stack(path),
                     remote_url: None,
                     agent_used: detect_agent(path),
@@ -710,6 +754,8 @@ pub fn scan_obsidian_vault(vault_path: &Path, folder: &str, vault_name: &str) ->
                 git_branch: None,
                 last_commit: None,
                 git_status: None,
+                ahead: None,
+                behind: None,
                 tech_stack: vec![],
                 remote_url: None,
                 agent_used: None,
@@ -743,6 +789,8 @@ pub fn scan_obsidian_vault(vault_path: &Path, folder: &str, vault_name: &str) ->
                                 git_branch: None,
                                 last_commit: None,
                                 git_status: None,
+                                ahead: None,
+                                behind: None,
                                 tech_stack: vec![],
                                 remote_url: None,
                                 agent_used: None,
@@ -779,6 +827,8 @@ pub fn scan_obsidian_vault(vault_path: &Path, folder: &str, vault_name: &str) ->
                     git_branch: None,
                     last_commit: None,
                     git_status: None,
+                    ahead: None,
+                    behind: None,
                     tech_stack: vec![],
                     remote_url: None,
                     agent_used: None,

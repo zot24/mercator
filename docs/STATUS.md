@@ -1,14 +1,19 @@
 # Mercator — Current State
 
-**Last updated:** 2026-05-27
+**Last updated:** 2026-06-19
 **Latest tag:** v0.1.x (master)
-**Test count:** 126 unit tests, all gated by CI
+**Test count:** 138 unit tests, all gated by CI
 
 This is the *living state* doc. [GOALS.md](../GOALS.md) is the long-term direction; [CLAUDE.md](../CLAUDE.md) is the operator's manual; this is "where are we right now." If you're picking up the project after time away, read this first.
 
 ---
 
 ## What just shipped
+
+The session ending 2026-06-19 made `mercator list` usable as a "what needs attention" view. Two parts:
+
+- **Pretty output.** `--format text` is now TTY-aware: an aligned, lightly-coloured table (`TYPE / NAME / SYNC / TECH / PATH`, home dir abbreviated to `~`, `NO_COLOR` respected) when stdout is a terminal, and the unchanged tab-separated rows when piped — so `awk` / `cut` / `grep` pipelines keep working untouched. `search` shares the same renderer.
+- **Attention filters.** `--no-git` (Folder/Idea — not a repo), `--no-remote` (no `origin` configured — covers folders *and* remote-less repos), and `--out-of-sync` (branch ahead and/or behind its upstream). The last is backed by new per-repo divergence counts: `git_ahead` / `git_behind` on `projects` (**schema v4**, added via `ALTER TABLE`), populated at survey time from `git rev-list --left-right --count @{u}...HEAD`. **No `git fetch`** runs — counts reflect the cached upstream as of the last fetch, keeping survey offline and fast. Both columns are NULL for non-git projects and repos with no remote-tracking branch, so `--out-of-sync` keys off `> 0`. The counts also ride along in `--format json` / `/api/map` as `gitAhead` / `gitBehind`.
 
 The session ending 2026-05-27 added a first-class **active set** — a path the user is currently working on, stored in `active_projects` (schema v3), managed via `mercator active add/remove/list/export`, and auto-exported to `active-projects.json` for Hermes (or any session-loader) to consume on each session start. The active set is *orthogonal* to surveyed state: it survives re-surveys, and a path can be activated before it's surveyed (and remains in the snapshot, just without enrichment). `mercator list --active` filters the existing project list to active projects only.
 
@@ -28,11 +33,11 @@ Test count went 0 → 102, closing [#12](https://github.com/zot24/mercator/issue
 
 ## Where the data lives now
 
-**Primary store: `mercator.db`** (SQLite, schema v2). Created and migrated on first `mercator survey` or `mercator serve`. PRAGMA `journal_mode = WAL` for read/write concurrency. Foreign keys on; cascades clean up the M2M relations.
+**Primary store: `mercator.db`** (SQLite, schema v4). Created and migrated on first `mercator survey` or `mercator serve`. PRAGMA `journal_mode = WAL` for read/write concurrency. Foreign keys on; cascades clean up the M2M relations.
 
 ```
 mercator.db
-├── projects            -- one row per surveyed project (Git/Folder/Idea/GitHub/GitLab/Obsidian)
+├── projects            -- one row per surveyed project (Git/Folder/Idea/GitHub/GitLab/Obsidian); git_ahead/git_behind added in v4
 ├── tags                -- normalized; populated by auto_tag_projects
 ├── project_tags        -- M2M
 ├── tech_stack          -- normalized; populated by detect_tech_stack

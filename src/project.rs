@@ -23,6 +23,17 @@ pub struct Project {
     pub last_commit: Option<String>,
     #[serde(rename = "gitStatus")]
     pub git_status: Option<String>,
+    /// Commits the local branch is ahead of its cached upstream
+    /// (unpushed). `None` when there's nothing to compare against — a
+    /// non-git project, or a git repo with no remote-tracking branch.
+    /// Computed from `git rev-list @{u}...HEAD` with **no fetch**, so it
+    /// reflects the upstream as of the last time it was fetched.
+    #[serde(rename = "gitAhead", default, skip_serializing_if = "Option::is_none")]
+    pub ahead: Option<i64>,
+    /// Commits the cached upstream is ahead of the local branch
+    /// (unpulled). Same source and caveats as [`Project::ahead`].
+    #[serde(rename = "gitBehind", default, skip_serializing_if = "Option::is_none")]
+    pub behind: Option<i64>,
     #[serde(rename = "techStack")]
     pub tech_stack: Vec<String>,
     #[serde(rename = "remoteUrl")]
@@ -147,6 +158,8 @@ mod tests {
             git_branch: None,
             last_commit: None,
             git_status: None,
+            ahead: None,
+            behind: None,
             tech_stack: vec![],
             remote_url: None,
             agent_used: None,
