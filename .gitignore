@@ -5,4 +5,7 @@ mercator.db
 mercator.db-shm
 mercator.db-wal
 .swarm/
-.claude/
+.claude/*
+# …but DO ship the bundled agent skill (versioned with the CLI it documents)
+!.claude/skills/
+active-projects.json
