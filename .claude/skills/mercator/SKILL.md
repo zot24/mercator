@@ -95,11 +95,19 @@ Generate a Markdown block of your projects (the active set by default) and splic
 it into a profile README between `<!-- MERCATOR:START -->` / `<!-- MERCATOR:END -->`:
 
 ```bash
-mercator readme --db "$DB"                       # print the block to stdout
+mercator readme --db "$DB"                       # print the block to stdout (table)
 mercator readme --db "$DB" --inject ~/me/README.md   # update in place
 mercator readme --db "$DB" --all --limit 10      # every project, capped
-mercator readme --db "$DB" --title "🚀 Current work" --no-badge
+mercator readme --db "$DB" --list                # bullet list w/ per-project tech emoji
+mercator readme --db "$DB" --public-only         # only verifiably-public repos (network)
+mercator readme --db "$DB" --list --public-only --title "🚀 Currently Building" --no-emoji
 ```
+
+- `--list` renders `- <emoji> **[name](url)** — description · tech`; the emoji is
+  derived from the project's primary tech (Rust→🦀, Go→🐹, …) — `--no-emoji` to drop it.
+- `--public-only` keeps only repos whose remote answers a 2xx unauthenticated GET
+  (private → 404 → dropped); repos with no browsable remote are dropped too. Needs
+  network; good for a **public** profile README so private work never leaks.
 
 Re-run any time the active set changes; everything outside the markers is left
 untouched.

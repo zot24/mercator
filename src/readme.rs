@@ -6,7 +6,7 @@
 //! so the output is deterministic and unit-testable. Only [`inject_file`] touches
 //! the filesystem.
 
-use crate::project::Project;
+use crate::project::{Project, ProjectType};
 use chrono::{DateTime, Utc};
 
 /// Markers that delimit the generated block in the target README. Everything
@@ -15,11 +15,24 @@ use chrono::{DateTime, Utc};
 pub const START_MARKER: &str = "<!-- MERCATOR:START -->";
 pub const END_MARKER: &str = "<!-- MERCATOR:END -->";
 
+/// Layout for the rendered project list.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Layout {
+    /// A Markdown table: `Project | Description | Stack`.
+    Table,
+    /// A bullet list — `- <emoji> **[name](url)** — description · ` + tech — that
+    /// reads well in a profile README's "currently building" section.
+    List,
+}
+
 /// Knobs for [`render_block`].
 pub struct ReadmeOptions {
     pub title: String,
     pub badge: bool,
     pub limit: Option<usize>,
+    pub layout: Layout,
+    /// Prefix each project with a tech-derived emoji (list layout only).
+    pub emoji: bool,
 }
 
 impl Default for ReadmeOptions {
@@ -28,6 +41,8 @@ impl Default for ReadmeOptions {
             title: "🛠️ What I'm working on".to_string(),
             badge: true,
             limit: None,
+            layout: Layout::Table,
+            emoji: true,
         }
     }
 }
@@ -114,6 +129,65 @@ fn stack_cell(p: &Project) -> String {
     }
 }
 
+/// A generic, tech-derived emoji for a project — keyed off its primary
+/// tech-stack entry, falling back to its project type. Deliberately agnostic:
+/// no per-project or per-user hard-coding, just language/type → glyph.
+pub fn tech_emoji(p: &Project) -> &'static str {
+    if let Some(primary) = p.tech_stack.first() {
+        let glyph = match primary.to_lowercase().as_str() {
+            "rust" => "🦀",
+            "go" | "golang" => "🐹",
+            "python" => "🐍",
+            "swift" => "🍎",
+            "typescript" => "🔷",
+            "javascript" | "node.js" | "node" | "bun" | "deno" => "🟢",
+            "ruby" => "💎",
+            "php" => "🐘",
+            "java" | "kotlin" => "☕",
+            "c" | "c++" | "cpp" => "⚙️",
+            "c#" | "csharp" | ".net" => "🟣",
+            "elixir" => "💧",
+            "zig" => "⚡",
+            "shell" | "bash" => "🐚",
+            "docker" => "🐳",
+            "html" | "css" => "🌐",
+            _ => "",
+        };
+        if !glyph.is_empty() {
+            return glyph;
+        }
+    }
+    match p.project_type {
+        ProjectType::Idea => "💡",
+        ProjectType::Folder => "📁",
+        ProjectType::Obsidian => "📓",
+        _ => "📦",
+    }
+}
+
+/// One bullet for the list layout: `- 🦀 **[name](url)** — description · `Rust``.
+fn list_item(p: &Project, emoji: bool) -> String {
+    let mut s = String::from("- ");
+    if emoji {
+        let e = tech_emoji(p);
+        if !e.is_empty() {
+            s.push_str(e);
+            s.push(' ');
+        }
+    }
+    s.push_str(&format!("**{}**", name_cell(p)));
+    let desc = truncate(&cell(&p.description), 160);
+    if !desc.is_empty() {
+        s.push_str(" — ");
+        s.push_str(&desc);
+    }
+    if !p.tech_stack.is_empty() {
+        s.push_str(" · ");
+        s.push_str(&stack_cell(p));
+    }
+    s
+}
+
 fn badge_line(generated: DateTime<Utc>) -> String {
     format!(
         "<sub>[![mapped by zot24/mercator]\
@@ -150,21 +224,30 @@ pub fn render_block(
             "_No active projects yet — add one with `mercator active add <path>`._".to_string(),
         );
     } else {
-        lines.push("| Project | Description | Stack |".to_string());
-        lines.push("| --- | --- | --- |".to_string());
-        for p in &shown {
-            let desc = truncate(&cell(&p.description), 110);
-            let desc = if desc.is_empty() {
-                "—".to_string()
-            } else {
-                desc
-            };
-            lines.push(format!(
-                "| {} | {} | {} |",
-                name_cell(p),
-                desc,
-                stack_cell(p)
-            ));
+        match opts.layout {
+            Layout::Table => {
+                lines.push("| Project | Description | Stack |".to_string());
+                lines.push("| --- | --- | --- |".to_string());
+                for p in &shown {
+                    let desc = truncate(&cell(&p.description), 110);
+                    let desc = if desc.is_empty() {
+                        "—".to_string()
+                    } else {
+                        desc
+                    };
+                    lines.push(format!(
+                        "| {} | {} | {} |",
+                        name_cell(p),
+                        desc,
+                        stack_cell(p)
+                    ));
+                }
+            }
+            Layout::List => {
+                for p in &shown {
+                    lines.push(list_item(p, opts.emoji));
+                }
+            }
         }
     }
 
@@ -212,6 +295,51 @@ pub fn inject_file(path: &std::path::Path, block: &str) -> Result<(), String> {
     };
     let updated = inject(&existing, block);
     std::fs::write(path, updated).map_err(|e| format!("write {}: {}", path.display(), e))
+}
+
+/// Keep only projects whose remote is a reachable **public** repo. Does an
+/// unauthenticated GET of each unique web URL — a public repo answers 2xx, a
+/// private or missing one answers 404 — so it needs no token and no schema
+/// change. Projects without a browsable remote are dropped (we can't verify
+/// them as public, and a profile README should never risk leaking private work).
+/// Returns `(kept, dropped_count)`.
+pub async fn retain_public(projects: Vec<Project>) -> (Vec<Project>, usize) {
+    use std::collections::HashMap;
+    let client = match reqwest::Client::builder()
+        .user_agent("mercator-readme")
+        .timeout(std::time::Duration::from_secs(8))
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return (projects, 0),
+    };
+    let mut cache: HashMap<String, bool> = HashMap::new();
+    let mut kept = Vec::new();
+    let mut dropped = 0;
+    for p in projects {
+        let public = match p.remote_url.as_deref().and_then(web_url) {
+            Some(url) => match cache.get(&url) {
+                Some(&v) => v,
+                None => {
+                    let v = client
+                        .get(&url)
+                        .send()
+                        .await
+                        .map(|r| r.status().is_success())
+                        .unwrap_or(false);
+                    cache.insert(url, v);
+                    v
+                }
+            },
+            None => false,
+        };
+        if public {
+            kept.push(p);
+        } else {
+            dropped += 1;
+        }
+    }
+    (kept, dropped)
 }
 
 #[cfg(test)]
@@ -280,6 +408,50 @@ mod tests {
     #[test]
     fn cell_escapes_pipes_and_collapses_whitespace() {
         assert_eq!(cell("a | b\nc"), "a \\| b c");
+    }
+
+    #[test]
+    fn tech_emoji_maps_language_then_type() {
+        assert_eq!(tech_emoji(&project("a", "", None, &["Rust"])), "🦀");
+        assert_eq!(tech_emoji(&project("a", "", None, &["Node.js"])), "🟢");
+        // unknown tech falls back to type glyph
+        assert_eq!(tech_emoji(&project("a", "", None, &["Cobol"])), "📦");
+        // no tech → type fallback
+        let mut idea = project("a", "", None, &[]);
+        idea.project_type = ProjectType::Idea;
+        assert_eq!(tech_emoji(&idea), "💡");
+    }
+
+    #[test]
+    fn list_layout_renders_emoji_bullet_with_bold_link() {
+        let projects = vec![project(
+            "zskills",
+            "Declarative package manager for agentic CLIs.",
+            Some("git@github.com:zot24/zskills.git"),
+            &["Rust"],
+        )];
+        let opts = ReadmeOptions {
+            layout: Layout::List,
+            badge: false,
+            ..Default::default()
+        };
+        let out = render_block(&projects, &opts, at("2026-06-21T00:00:00Z"));
+        assert!(out.contains("- 🦀 **[zskills](https://github.com/zot24/zskills)** —"));
+        assert!(out.contains("`Rust`"));
+        assert!(!out.contains("| Project |")); // no table in list mode
+    }
+
+    #[test]
+    fn list_layout_no_emoji_option() {
+        let projects = vec![project("x", "d", None, &["Rust"])];
+        let opts = ReadmeOptions {
+            layout: Layout::List,
+            emoji: false,
+            ..Default::default()
+        };
+        let out = render_block(&projects, &opts, at("2026-06-21T00:00:00Z"));
+        assert!(out.contains("- **x**"));
+        assert!(!out.contains("🦀"));
     }
 
     #[test]

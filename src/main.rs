@@ -351,6 +351,23 @@ enum Commands {
         /// Omit the "mapped by mercator" badge/footer
         #[arg(long = "no-badge")]
         no_badge: bool,
+
+        /// Only include repos that are verifiably **public** — each remote is
+        /// checked unauthenticated (public → reachable, private → 404). Repos
+        /// with no browsable remote are dropped. Useful for a public profile
+        /// README so private work never leaks. Requires network.
+        #[arg(long = "public-only")]
+        public_only: bool,
+
+        /// Render a bullet list (`- <emoji> **[name](url)** — description`)
+        /// instead of a table — reads better in a profile "currently building"
+        /// section.
+        #[arg(long)]
+        list: bool,
+
+        /// In list layout, omit the per-project tech emoji.
+        #[arg(long = "no-emoji")]
+        no_emoji: bool,
     },
     /// Start the visualization server
     Serve {
@@ -1749,6 +1766,9 @@ async fn main() {
             limit,
             title,
             no_badge,
+            public_only,
+            list,
+            no_emoji,
         } => {
             let conn = match db::open(&db_path) {
                 Ok(c) => c,
@@ -1766,17 +1786,33 @@ async fn main() {
                 no_remote: false,
                 out_of_sync: false,
             };
-            let projects = match db::list_projects(&conn, &filter) {
+            let mut projects = match db::list_projects(&conn, &filter) {
                 Ok(p) => p,
                 Err(e) => {
                     eprintln!("Error: {}", e);
                     std::process::exit(1);
                 }
             };
+            if public_only {
+                let (kept, dropped) = readme::retain_public(projects).await;
+                if dropped > 0 {
+                    eprintln!(
+                        "public-only: dropped {} non-public/unverifiable project(s)",
+                        dropped
+                    );
+                }
+                projects = kept;
+            }
             let opts = readme::ReadmeOptions {
                 title: title.unwrap_or_else(|| "🛠️ What I'm working on".to_string()),
                 badge: !no_badge,
                 limit,
+                layout: if list {
+                    readme::Layout::List
+                } else {
+                    readme::Layout::Table
+                },
+                emoji: !no_emoji,
             };
             let block = readme::render_block(&projects, &opts, chrono::Utc::now());
             match inject {
