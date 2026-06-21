@@ -1794,11 +1794,16 @@ async fn main() {
                 }
             };
             if public_only {
-                let (kept, dropped) = readme::retain_public(projects).await;
+                let (kept, dropped, unknown) = readme::retain_public(projects).await;
                 if dropped > 0 {
+                    eprintln!("public-only: dropped {} non-public project(s)", dropped);
+                }
+                if unknown > 0 {
                     eprintln!(
-                        "public-only: dropped {} non-public/unverifiable project(s)",
-                        dropped
+                        "public-only: {} repo(s) couldn't be verified (rate-limited?) and were \
+                         dropped — set GITHUB_TOKEN (e.g. `GITHUB_TOKEN=$(gh auth token)`) for \
+                         reliable results.",
+                        unknown
                     );
                 }
                 projects = kept;

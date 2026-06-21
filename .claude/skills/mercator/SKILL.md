@@ -105,9 +105,12 @@ mercator readme --db "$DB" --list --public-only --title "🚀 Currently Building
 
 - `--list` renders `- <emoji> **[name](url)** — description · tech`; the emoji is
   derived from the project's primary tech (Rust→🦀, Go→🐹, …) — `--no-emoji` to drop it.
-- `--public-only` keeps only repos whose remote answers a 2xx unauthenticated GET
-  (private → 404 → dropped); repos with no browsable remote are dropped too. Needs
-  network; good for a **public** profile README so private work never leaks.
+- `--public-only` keeps only verifiably-public repos (private/remote-less dropped),
+  so private work never leaks onto a public profile. **Set `GITHUB_TOKEN` for
+  reliable results** — `GITHUB_TOKEN=$(gh auth token) mercator readme --public-only`
+  — it uses the GitHub API (definitive `private` flag, no rate limit). Without a
+  token it falls back to an unauthenticated web check that can be rate-limited;
+  unverifiable repos are then dropped with a warning.
 
 Re-run any time the active set changes; everything outside the markers is left
 untouched.
