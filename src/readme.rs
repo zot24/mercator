@@ -316,49 +316,101 @@ pub fn inject_file(path: &std::path::Path, block: &str) -> Result<(), String> {
     std::fs::write(path, updated).map_err(|e| format!("write {}: {}", path.display(), e))
 }
 
-/// Keep only projects whose remote is a reachable **public** repo. Does an
-/// unauthenticated GET of each unique web URL — a public repo answers 2xx, a
-/// private or missing one answers 404 — so it needs no token and no schema
-/// change. Projects without a browsable remote are dropped (we can't verify
-/// them as public, and a profile README should never risk leaking private work).
-/// Returns `(kept, dropped_count)`.
-pub async fn retain_public(projects: Vec<Project>) -> (Vec<Project>, usize) {
+/// (host, owner, repo) parsed from a browsable `https://host/owner/repo` URL.
+fn repo_slug(web: &str) -> Option<(String, String, String)> {
+    let rest = web
+        .strip_prefix("https://")
+        .or_else(|| web.strip_prefix("http://"))?;
+    let (host, path) = rest.split_once('/')?;
+    let mut seg = path.split('/').filter(|s| !s.is_empty());
+    let owner = seg.next()?.to_string();
+    let repo = seg.next()?.to_string();
+    Some((host.to_string(), owner, repo))
+}
+
+/// Outcome of a single visibility probe.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Visibility {
+    Public,
+    Private,
+    /// Couldn't determine (rate-limited / network / unexpected status).
+    Unknown,
+}
+
+/// Probe a single repo. With a GitHub token we hit the API for a definitive
+/// `private` flag (and dodge the 60/hr unauthenticated limit). Otherwise we GET
+/// the web URL: 2xx = public, 404 = private/missing, anything else = unknown.
+async fn probe_visibility(
+    client: &reqwest::Client,
+    web: &str,
+    github_token: Option<&str>,
+) -> Visibility {
+    if let (Some(tok), Some((host, owner, repo))) = (github_token, repo_slug(web)) {
+        if host == "github.com" {
+            let api = format!("https://api.github.com/repos/{}/{}", owner, repo);
+            return match client.get(&api).bearer_auth(tok).send().await {
+                Ok(r) if r.status().is_success() => match r.json::<serde_json::Value>().await {
+                    Ok(j) if j.get("private").and_then(|v| v.as_bool()) == Some(false) => {
+                        Visibility::Public
+                    }
+                    Ok(_) => Visibility::Private,
+                    Err(_) => Visibility::Unknown,
+                },
+                Ok(r) if r.status().as_u16() == 404 => Visibility::Private,
+                _ => Visibility::Unknown,
+            };
+        }
+    }
+    match client.get(web).send().await {
+        Ok(r) if r.status().is_success() => Visibility::Public,
+        Ok(r) if r.status().as_u16() == 404 => Visibility::Private,
+        _ => Visibility::Unknown,
+    }
+}
+
+/// Keep only projects that are verifiably **public**. Uses the GitHub API when
+/// `GITHUB_TOKEN` is set (reliable + no rate limit); otherwise an unauthenticated
+/// web check. A profile README must never leak private work, so anything we
+/// can't confirm public — private, remote-less, or unverifiable — is dropped.
+/// Returns `(kept, dropped_count, unknown_count)`; a non-zero `unknown_count`
+/// means some repos couldn't be checked (set `GITHUB_TOKEN` for reliable results).
+pub async fn retain_public(projects: Vec<Project>) -> (Vec<Project>, usize, usize) {
     use std::collections::HashMap;
+    let token = std::env::var("GITHUB_TOKEN").ok().filter(|t| !t.is_empty());
     let client = match reqwest::Client::builder()
         .user_agent("mercator-readme")
-        .timeout(std::time::Duration::from_secs(8))
+        .timeout(std::time::Duration::from_secs(10))
         .build()
     {
         Ok(c) => c,
-        Err(_) => return (projects, 0),
+        Err(_) => return (projects, 0, 0),
     };
-    let mut cache: HashMap<String, bool> = HashMap::new();
+    let mut cache: HashMap<String, Visibility> = HashMap::new();
     let mut kept = Vec::new();
     let mut dropped = 0;
+    let mut unknown = 0;
     for p in projects {
-        let public = match p.remote_url.as_deref().and_then(web_url) {
+        let vis = match p.remote_url.as_deref().and_then(web_url) {
             Some(url) => match cache.get(&url) {
                 Some(&v) => v,
                 None => {
-                    let v = client
-                        .get(&url)
-                        .send()
-                        .await
-                        .map(|r| r.status().is_success())
-                        .unwrap_or(false);
+                    let v = probe_visibility(&client, &url, token.as_deref()).await;
                     cache.insert(url, v);
                     v
                 }
             },
-            None => false,
+            None => Visibility::Private,
         };
-        if public {
-            kept.push(p);
-        } else {
-            dropped += 1;
+        match vis {
+            Visibility::Public => kept.push(p),
+            Visibility::Private => dropped += 1,
+            Visibility::Unknown => {
+                dropped += 1;
+                unknown += 1;
+            }
         }
     }
-    (kept, dropped)
+    (kept, dropped, unknown)
 }
 
 #[cfg(test)]
@@ -427,6 +479,20 @@ mod tests {
     #[test]
     fn cell_escapes_pipes_and_collapses_whitespace() {
         assert_eq!(cell("a | b\nc"), "a \\| b c");
+    }
+
+    #[test]
+    fn repo_slug_parses_host_owner_repo() {
+        assert_eq!(
+            repo_slug("https://github.com/zot24/dewey"),
+            Some(("github.com".into(), "zot24".into(), "dewey".into()))
+        );
+        assert_eq!(
+            repo_slug("https://gitlab.com/group/proj"),
+            Some(("gitlab.com".into(), "group".into(), "proj".into()))
+        );
+        assert_eq!(repo_slug("https://github.com/onlyowner"), None);
+        assert_eq!(repo_slug("not a url"), None);
     }
 
     #[test]
