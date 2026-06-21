@@ -188,14 +188,30 @@ pub fn tech_emoji(p: &Project) -> &'static str {
 /// than `max`. Avoids the mid-word "…" cuts a blind char-truncate produces.
 fn concise(desc: &str, max: usize) -> String {
     let clean = cell(desc);
-    let first = match clean.find(". ") {
-        Some(i) => clean[..=i].trim().to_string(),
-        None => clean.clone(),
-    };
-    if first.chars().count() <= max {
-        return first;
+    // 1) First sentence (up to ". "), if it fits.
+    if let Some(i) = clean.find(". ") {
+        let s = clean[..=i].trim();
+        if s.chars().count() <= max {
+            return s.to_string();
+        }
     }
-    let cut: String = first.chars().take(max).collect();
+    // 2) The whole thing, if it already fits.
+    if clean.chars().count() <= max {
+        return clean;
+    }
+    // 3) First clause before a dash — a natural "complete thought" break for
+    //    run-on descriptions that have no early period (avoids a mid-word "…").
+    for sep in [" — ", " – ", " - "] {
+        if let Some(i) = clean.find(sep) {
+            let s = clean[..i].trim();
+            let n = s.chars().count();
+            if n > 0 && n <= max {
+                return s.to_string();
+            }
+        }
+    }
+    // 4) Last resort: truncate at a word boundary.
+    let cut: String = clean.chars().take(max).collect();
     let trimmed = match cut.rfind(' ') {
         Some(i) => &cut[..i],
         None => cut.as_str(),
@@ -563,6 +579,15 @@ mod tests {
             ),
             "Your wiki's librarian, on the desktop."
         );
+        // run-on with no period → break at the em-dash clause, no "…"
+        assert_eq!(
+            concise(
+                "A native app to track jobs on your Mac — cron, launchd, and more in one place forever",
+                60
+            ),
+            "A native app to track jobs on your Mac"
+        );
+        // no period and no dash → word-boundary truncation with "…"
         let long =
             "A native menu-bar app to visualize and track scheduled jobs on your Mac everywhere";
         let out = concise(long, 40);
