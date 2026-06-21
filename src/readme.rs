@@ -7,7 +7,6 @@
 //! the filesystem.
 
 use crate::project::{Project, ProjectType};
-use chrono::{DateTime, Utc};
 
 /// Markers that delimit the generated block in the target README. Everything
 /// between them is owned by mercator and replaced on each run; everything
@@ -207,23 +206,16 @@ fn list_item(p: &Project, emoji: bool) -> String {
     s
 }
 
-fn badge_line(generated: DateTime<Utc>) -> String {
-    format!(
-        "<sub>[![mapped by zot24/mercator]\
-         (https://img.shields.io/badge/mapped_by-zot24%2Fmercator-2563eb?style=flat-square&logo=rust&logoColor=white)]\
-         (https://github.com/zot24/mercator) · updated {}</sub>",
-        generated.format("%Y-%m-%d")
-    )
+fn badge_line() -> &'static str {
+    "<sub>[![mapped by zot24/mercator]\
+     (https://img.shields.io/badge/mapped_by-zot24%2Fmercator-2563eb?style=flat-square&logo=rust&logoColor=white)]\
+     (https://github.com/zot24/mercator)</sub>"
 }
 
 /// Render the full Markdown block — markers included — for `projects`. Projects
 /// are sorted by name for a stable, low-churn diff, then capped to
 /// `opts.limit`.
-pub fn render_block(
-    projects: &[Project],
-    opts: &ReadmeOptions,
-    generated: DateTime<Utc>,
-) -> String {
+pub fn render_block(projects: &[Project], opts: &ReadmeOptions) -> String {
     let mut shown: Vec<&Project> = projects.iter().collect();
     shown.sort_by_key(|p| display_name(p).to_lowercase());
     if let Some(n) = opts.limit {
@@ -272,7 +264,7 @@ pub fn render_block(
 
     if opts.badge {
         lines.push(String::new());
-        lines.push(badge_line(generated));
+        lines.push(badge_line().to_string());
     }
     lines.push(END_MARKER.to_string());
     lines.join("\n")
@@ -439,10 +431,6 @@ mod tests {
         }
     }
 
-    fn at(s: &str) -> DateTime<Utc> {
-        DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc)
-    }
-
     #[test]
     fn web_url_handles_ssh_https_and_dotgit() {
         assert_eq!(
@@ -527,7 +515,7 @@ mod tests {
             badge: false,
             ..Default::default()
         };
-        let out = render_block(&projects, &opts, at("2026-06-21T00:00:00Z"));
+        let out = render_block(&projects, &opts);
         assert!(out.contains("- 🦀 **[zskills](https://github.com/zot24/zskills)** —"));
         assert!(out.contains("`Rust`"));
         assert!(!out.contains("| Project |")); // no table in list mode
@@ -541,7 +529,7 @@ mod tests {
             emoji: false,
             ..Default::default()
         };
-        let out = render_block(&projects, &opts, at("2026-06-21T00:00:00Z"));
+        let out = render_block(&projects, &opts);
         assert!(out.contains("- **x**"));
         assert!(!out.contains("🦀"));
     }
@@ -561,7 +549,7 @@ mod tests {
             &["Swift"],
         )];
         let opts = ReadmeOptions::default();
-        let out = render_block(&projects, &opts, at("2026-06-21T00:00:00Z"));
+        let out = render_block(&projects, &opts);
 
         assert!(out.starts_with(START_MARKER));
         assert!(out.trim_end().ends_with(END_MARKER));
@@ -569,7 +557,6 @@ mod tests {
         assert!(out.contains("[dewey](https://github.com/zot24/dewey)"));
         assert!(out.contains("`Swift`"));
         assert!(out.contains("mercator")); // badge
-        assert!(out.contains("updated 2026-06-21"));
     }
 
     #[test]
@@ -583,7 +570,7 @@ mod tests {
             limit: Some(2),
             ..Default::default()
         };
-        let out = render_block(&projects, &opts, at("2026-06-21T00:00:00Z"));
+        let out = render_block(&projects, &opts);
         assert!(out.contains("alpha"));
         assert!(out.contains("mango"));
         assert!(!out.contains("zebra")); // truncated after sort
@@ -591,7 +578,7 @@ mod tests {
 
     #[test]
     fn render_block_empty_is_friendly() {
-        let out = render_block(&[], &ReadmeOptions::default(), at("2026-06-21T00:00:00Z"));
+        let out = render_block(&[], &ReadmeOptions::default());
         assert!(out.contains("No active projects"));
         assert!(out.starts_with(START_MARKER));
     }
@@ -602,7 +589,7 @@ mod tests {
             badge: false,
             ..Default::default()
         };
-        let out = render_block(&[], &opts, at("2026-06-21T00:00:00Z"));
+        let out = render_block(&[], &opts);
         assert!(!out.contains("shields.io"));
     }
 
