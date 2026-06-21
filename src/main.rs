@@ -33,6 +33,7 @@ mod config;
 mod db;
 mod markdown;
 mod project;
+mod readme;
 mod skills;
 mod sources;
 mod tags_graph;
@@ -306,6 +307,50 @@ enum Commands {
         /// Subdirectory inside the Obsidian vault (default: "Projects")
         #[arg(long, default_value = "Projects")]
         obsidian_folder: String,
+    },
+    /// Generate a Markdown "projects" section (the active set by default) for a
+    /// profile README, and optionally splice it into a file between
+    /// `<!-- MERCATOR:START -->` / `<!-- MERCATOR:END -->` markers. Without
+    /// `--inject` the block is printed to stdout.
+    Readme {
+        /// SQLite database file
+        #[arg(short = 'd', long, default_value = "mercator.db")]
+        db: PathBuf,
+
+        /// Update this file in place, replacing the content between the
+        /// mercator markers (appends a fresh block if the markers are absent).
+        /// A missing file is created.
+        #[arg(long)]
+        inject: Option<PathBuf>,
+
+        /// Include every project instead of just the active set
+        /// (see `mercator active`).
+        #[arg(long)]
+        all: bool,
+
+        /// Filter by project type (Git, Folder, Idea, GitHub, GitLab, Obsidian)
+        #[arg(short = 't', long = "type")]
+        project_type: Option<String>,
+
+        /// Filter by tag (exact match — case-sensitive)
+        #[arg(long)]
+        tag: Option<String>,
+
+        /// Filter by tech-stack entry (e.g. "Rust", "Node.js")
+        #[arg(long)]
+        tech: Option<String>,
+
+        /// Cap the number of projects rendered
+        #[arg(long)]
+        limit: Option<usize>,
+
+        /// Section heading (default: "🛠️ What I'm working on")
+        #[arg(long)]
+        title: Option<String>,
+
+        /// Omit the "mapped by mercator" badge/footer
+        #[arg(long = "no-badge")]
+        no_badge: bool,
     },
     /// Start the visualization server
     Serve {
@@ -1692,6 +1737,58 @@ async fn main() {
                     eprintln!("Error: {}", e);
                     std::process::exit(1);
                 }
+            }
+        }
+        Commands::Readme {
+            db: db_path,
+            inject,
+            all,
+            project_type,
+            tag,
+            tech,
+            limit,
+            title,
+            no_badge,
+        } => {
+            let conn = match db::open(&db_path) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("Error: open db {}: {}", db_path.display(), e);
+                    std::process::exit(1);
+                }
+            };
+            let filter = db::ListFilter {
+                project_type,
+                tag,
+                tech,
+                active: !all,
+                no_git: false,
+                no_remote: false,
+                out_of_sync: false,
+            };
+            let projects = match db::list_projects(&conn, &filter) {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("Error: {}", e);
+                    std::process::exit(1);
+                }
+            };
+            let opts = readme::ReadmeOptions {
+                title: title.unwrap_or_else(|| "🛠️ What I'm working on".to_string()),
+                badge: !no_badge,
+                limit,
+            };
+            let block = readme::render_block(&projects, &opts, chrono::Utc::now());
+            match inject {
+                Some(file) => {
+                    if let Err(e) = readme::inject_file(&file, &block) {
+                        eprintln!("Error: {}", e);
+                        std::process::exit(1);
+                    }
+                    let shown = limit.map_or(projects.len(), |n| projects.len().min(n));
+                    eprintln!("Updated {} ({} projects)", file.display(), shown);
+                }
+                None => println!("{}", block),
             }
         }
         Commands::Serve {

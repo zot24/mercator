@@ -74,6 +74,12 @@ cargo run -- active list --format json       # enriched payload with project met
 cargo run -- list --active                   # filter the project list to active only
 cargo run -- active remove ~/Desktop/code/mercator
 cargo run -- active export                   # rewrite the JSON snapshot from current state
+
+# Generate a Markdown "projects" section (active set by default) for a profile
+# README, spliced between <!-- MERCATOR:START --> / <!-- MERCATOR:END --> markers.
+cargo run -- readme                              # print the block to stdout
+cargo run -- readme --inject ~/me/README.md      # update a profile README in place
+cargo run -- readme --all --limit 10 --no-badge  # every project, capped, no badge
 ```
 
 The `-d/--db` flag is on every subcommand and defaults to `mercator.db`.
