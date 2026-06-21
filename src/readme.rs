@@ -129,12 +129,14 @@ fn stack_cell(p: &Project) -> String {
     }
 }
 
-/// A generic, tech-derived emoji for a project — keyed off its primary
-/// tech-stack entry, falling back to its project type. Deliberately agnostic:
-/// no per-project or per-user hard-coding, just language/type → glyph.
+/// A generic, tech-derived emoji for a project. Prefers a **language** glyph
+/// (the most identifying signal) over tooling like Docker, scanning the whole
+/// tech stack rather than just the first entry — so a `[Docker, Rust]` project
+/// reads as 🦀, not 🐳 — then falls back to the project type. Deliberately
+/// agnostic: no per-project or per-user hard-coding.
 pub fn tech_emoji(p: &Project) -> &'static str {
-    if let Some(primary) = p.tech_stack.first() {
-        let glyph = match primary.to_lowercase().as_str() {
+    fn language(tech: &str) -> &'static str {
+        match tech {
             "rust" => "🦀",
             "go" | "golang" => "🐹",
             "python" => "🐍",
@@ -149,12 +151,29 @@ pub fn tech_emoji(p: &Project) -> &'static str {
             "elixir" => "💧",
             "zig" => "⚡",
             "shell" | "bash" => "🐚",
-            "docker" => "🐳",
             "html" | "css" => "🌐",
             _ => "",
-        };
-        if !glyph.is_empty() {
-            return glyph;
+        }
+    }
+    fn tooling(tech: &str) -> &'static str {
+        match tech {
+            "docker" => "🐳",
+            "kubernetes" | "k8s" => "☸️",
+            "terraform" => "🏗️",
+            _ => "",
+        }
+    }
+    // Pass 1: first known language. Pass 2: first known tool. Then type.
+    for t in &p.tech_stack {
+        let g = language(&t.to_lowercase());
+        if !g.is_empty() {
+            return g;
+        }
+    }
+    for t in &p.tech_stack {
+        let g = tooling(&t.to_lowercase());
+        if !g.is_empty() {
+            return g;
         }
     }
     match p.project_type {
@@ -414,6 +433,13 @@ mod tests {
     fn tech_emoji_maps_language_then_type() {
         assert_eq!(tech_emoji(&project("a", "", None, &["Rust"])), "🦀");
         assert_eq!(tech_emoji(&project("a", "", None, &["Node.js"])), "🟢");
+        // prefers a language glyph over tooling, regardless of stack order
+        assert_eq!(
+            tech_emoji(&project("a", "", None, &["Docker", "Rust"])),
+            "🦀"
+        );
+        // tooling glyph when no language is present
+        assert_eq!(tech_emoji(&project("a", "", None, &["Docker"])), "🐳");
         // unknown tech falls back to type glyph
         assert_eq!(tech_emoji(&project("a", "", None, &["Cobol"])), "📦");
         // no tech → type fallback
