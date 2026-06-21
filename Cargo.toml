@@ -1,6 +1,6 @@
 [package]
 name = "mercator"
-version = "0.6.0"
+version = "0.7.0"
 edition = "2021"
 description = "Cartography for your local development landscape — Rust CLI + web dashboard that maps your projects across local dirs, GitHub, GitLab, and Obsidian."
 license = "MIT"
