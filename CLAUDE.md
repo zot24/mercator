@@ -77,9 +77,12 @@ cargo run -- active export                   # rewrite the JSON snapshot from cu
 
 # Generate a Markdown "projects" section (active set by default) for a profile
 # README, spliced between <!-- MERCATOR:START --> / <!-- MERCATOR:END --> markers.
-cargo run -- readme                              # print the block to stdout
+cargo run -- readme                              # print the block to stdout (table)
 cargo run -- readme --inject ~/me/README.md      # update a profile README in place
 cargo run -- readme --all --limit 10 --no-badge  # every project, capped, no badge
+cargo run -- readme --list                       # bullet list w/ per-project tech emoji
+cargo run -- readme --public-only                # only verifiably-public repos (network)
+cargo run -- readme --list --public-only --title "🚀 Currently Building" --inject README.md
 ```
 
 The `-d/--db` flag is on every subcommand and defaults to `mercator.db`.
