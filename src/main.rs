@@ -1819,7 +1819,7 @@ async fn main() {
                 },
                 emoji: !no_emoji,
             };
-            let block = readme::render_block(&projects, &opts, chrono::Utc::now());
+            let block = readme::render_block(&projects, &opts);
             match inject {
                 Some(file) => {
                     if let Err(e) = readme::inject_file(&file, &block) {
