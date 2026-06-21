@@ -183,6 +183,26 @@ pub fn tech_emoji(p: &Project) -> &'static str {
     }
 }
 
+/// A concise one-liner: the first sentence of the description (kept whole),
+/// falling back to a word-boundary truncation if that sentence is still longer
+/// than `max`. Avoids the mid-word "…" cuts a blind char-truncate produces.
+fn concise(desc: &str, max: usize) -> String {
+    let clean = cell(desc);
+    let first = match clean.find(". ") {
+        Some(i) => clean[..=i].trim().to_string(),
+        None => clean.clone(),
+    };
+    if first.chars().count() <= max {
+        return first;
+    }
+    let cut: String = first.chars().take(max).collect();
+    let trimmed = match cut.rfind(' ') {
+        Some(i) => &cut[..i],
+        None => cut.as_str(),
+    };
+    format!("{}…", trimmed.trim_end())
+}
+
 /// One bullet for the list layout: `- 🦀 **[name](url)** — description · `Rust``.
 fn list_item(p: &Project, emoji: bool) -> String {
     let mut s = String::from("- ");
@@ -194,7 +214,7 @@ fn list_item(p: &Project, emoji: bool) -> String {
         }
     }
     s.push_str(&format!("**{}**", name_cell(p)));
-    let desc = truncate(&cell(&p.description), 160);
+    let desc = concise(&p.description, 140);
     if !desc.is_empty() {
         s.push_str(" — ");
         s.push_str(&desc);
@@ -532,6 +552,22 @@ mod tests {
         let out = render_block(&projects, &opts);
         assert!(out.contains("- **x**"));
         assert!(!out.contains("🦀"));
+    }
+
+    #[test]
+    fn concise_prefers_first_sentence_then_word_boundary() {
+        assert_eq!(
+            concise(
+                "Your wiki's librarian, on the desktop. A native macOS app.",
+                140
+            ),
+            "Your wiki's librarian, on the desktop."
+        );
+        let long =
+            "A native menu-bar app to visualize and track scheduled jobs on your Mac everywhere";
+        let out = concise(long, 40);
+        assert!(out.ends_with('…'));
+        assert!(!out.contains("everywhere")); // cut before the last word
     }
 
     #[test]

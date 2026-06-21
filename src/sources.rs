@@ -417,6 +417,7 @@ pub fn detect_tech_stack(path: &Path) -> Vec<String> {
         ("build.gradle", "Java"),
         ("composer.json", "PHP"),
         ("mix.exs", "Elixir"),
+        ("Package.swift", "Swift"),
     ];
 
     if let Ok(entries) = std::fs::read_dir(path) {
@@ -428,6 +429,12 @@ pub fn detect_tech_stack(path: &Path) -> Vec<String> {
                 if name == *marker && !stack.contains(&tech.to_string()) {
                     stack.push(tech.to_string());
                 }
+            }
+            // Xcode projects are `*.xcodeproj` / `*.xcworkspace` bundles.
+            if (name.ends_with(".xcodeproj") || name.ends_with(".xcworkspace"))
+                && !stack.contains(&"Swift".to_string())
+            {
+                stack.push("Swift".to_string());
             }
         }
     }
