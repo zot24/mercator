@@ -2004,6 +2004,16 @@ mod tests {
         assert_eq!(strip_inline_md("plain words 123"), "plain words 123");
     }
 
+    #[test]
+    fn strip_inline_md_preserves_multibyte_utf8() {
+        // Regression: walking bytes-as-chars used to Latin-1-shatter the em-dash
+        // (E2 80 94) into "â\u{80}\u{94}". Must survive intact now.
+        assert_eq!(
+            strip_inline_md("a wiki hub — **ask** it 🚀 café"),
+            "a wiki hub — ask it 🚀 café"
+        );
+    }
+
     // ── normalize_remote_url ───────────────────────────────────────────
 
     #[test]

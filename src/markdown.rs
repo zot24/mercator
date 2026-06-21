@@ -13,31 +13,35 @@ use std::path::Path;
 /// `\`x\`` → `x`. Anything more elaborate (HTML, footnotes) survives.
 pub fn strip_inline_md(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
-    let bytes = s.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        let c = bytes[i] as char;
+    // Iterate by char (not byte) so multi-byte UTF-8 — em-dashes, emoji,
+    // accents — survives intact. `char_indices` still yields byte offsets, so
+    // the link-slicing arithmetic below is unchanged.
+    let mut chars = s.char_indices().peekable();
+    while let Some((i, c)) = chars.next() {
         if c == '[' {
             if let Some(close_brk) = s[i..].find("](") {
                 let text_end = i + close_brk;
                 if let Some(close_par) = s[text_end + 2..].find(')') {
                     out.push_str(&s[i + 1..text_end]);
-                    i = text_end + 2 + close_par + 1;
+                    // Skip the iterator past the consumed `[text](url)`.
+                    let target = text_end + 2 + close_par + 1;
+                    while chars.peek().is_some_and(|&(j, _)| j < target) {
+                        chars.next();
+                    }
                     continue;
                 }
             }
+            out.push(c);
         } else if c == '*' || c == '_' {
-            i += 1;
-            while i < bytes.len() && (bytes[i] as char == c) {
-                i += 1;
+            // Drop a run of the same emphasis marker.
+            while chars.peek().is_some_and(|&(_, nc)| nc == c) {
+                chars.next();
             }
-            continue;
         } else if c == '`' {
-            i += 1;
-            continue;
+            // Drop the backtick.
+        } else {
+            out.push(c);
         }
-        out.push(c);
-        i += 1;
     }
     out
 }
