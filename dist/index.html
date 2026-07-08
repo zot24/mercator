@@ -664,6 +664,8 @@ user = "team_xxxxx"    # optional teamId for team-scoped accounts
                 <span id="preview-banner" class="mono text-[10px] flex-shrink-0 ml-2"></span>
             </div>
             <div class="flex items-center gap-2 flex-shrink-0">
+                <button id="preview-files-btn" onclick="showProjectFiles()" class="mono text-[10px] px-2 py-1 border border-primary/50 text-primary transition-colors">FILES</button>
+                <button id="preview-issues-btn" onclick="showProjectIssues()" class="mono text-[10px] px-2 py-1 border border-outline-variant hover:border-secondary text-on-surface-variant hover:text-secondary transition-colors">ISSUES</button>
                 <a id="preview-ide" target="_blank" class="mono text-[10px] px-2 py-1 border border-outline-variant hover:border-primary text-on-surface-variant hover:text-primary transition-colors">IDE</a>
                 <button id="preview-claude" class="mono text-[10px] px-2 py-1 border border-outline-variant hover:border-claude-orange text-on-surface-variant hover:text-claude-orange transition-colors">CLAUDE</button>
                 <button onclick="closePreview()" class="material-symbols-outlined text-on-surface-variant hover:text-on-surface text-[20px]">close</button>
@@ -847,9 +849,19 @@ user = "team_xxxxx"    # optional teamId for team-scoped accounts
         if (p) switchPreviewProject(p);
     }
 
+    // Per-project preview tab state ('files' | 'issues'), the last opened file
+    // (so switching back to FILES restores it), and cached issues for the
+    // open project (fetched once on open so the count badge + panel are instant).
+    let previewTab = 'files';
+    let previewLastFile = null;
+    let previewIssuesData = null;
+
     function switchPreviewProject(p) {
         previewProject = p;
         previewActiveEl = null;
+        previewLastFile = null;
+        previewIssuesData = null;
+        setPreviewTab('files');
         document.getElementById('preview-title').textContent = p.name.toUpperCase();
         document.getElementById('preview-path').textContent = p.path;
         document.getElementById('preview-ide').href = 'vscode://file/' + encodeURIComponent(p.path);
@@ -859,6 +871,7 @@ user = "team_xxxxx"    # optional teamId for team-scoped accounts
         document.getElementById('preview-file-meta').textContent = '—';
         renderPreviewBanner(p);
         renderPreviewProjectList();
+        loadProjectIssuesCount(p);
 
         fetch('/api/project/tree?path=' + encodeURIComponent(p.path))
             .then(r => r.json())
@@ -881,6 +894,83 @@ user = "team_xxxxx"    # optional teamId for team-scoped accounts
                     document.getElementById('preview-file-meta').textContent = '—';
                 }
             });
+    }
+
+    // ── Per-project GitHub issues (preview FILES/ISSUES tabs) ───────────
+    function setPreviewTab(tab) {
+        previewTab = tab;
+        const filesBtn = document.getElementById('preview-files-btn');
+        const issuesBtn = document.getElementById('preview-issues-btn');
+        if (filesBtn) filesBtn.className = `mono text-[10px] px-2 py-1 border ${tab === 'files' ? 'border-primary/50 text-primary' : 'border-outline-variant hover:border-primary text-on-surface-variant hover:text-primary'} transition-colors`;
+        if (issuesBtn) issuesBtn.className = `mono text-[10px] px-2 py-1 border ${tab === 'issues' ? 'border-secondary text-secondary' : 'border-outline-variant hover:border-secondary text-on-surface-variant hover:text-secondary'} transition-colors`;
+    }
+
+    async function loadProjectIssuesCount(p) {
+        const btn = document.getElementById('preview-issues-btn');
+        if (!btn) return;
+        btn.textContent = 'ISSUES';
+        if (!p.remoteUrl) { previewIssuesData = { issues: [], open: 0, closed: 0, noRemote: true }; return; }
+        try {
+            const data = await (await fetch('/api/project/issues?remote=' + encodeURIComponent(p.remoteUrl))).json();
+            if (previewProject !== p) return;
+            previewIssuesData = data;
+            const total = (data.open || 0) + (data.closed || 0);
+            btn.textContent = total ? `ISSUES · ${total}` : 'ISSUES';
+        } catch (e) { /* count badge is best-effort */ }
+    }
+
+    function showProjectFiles() {
+        setPreviewTab('files');
+        document.getElementById('preview-file-meta').textContent = previewLastFile ? previewLastFile.name : '—';
+        if (previewLastFile) openPreviewFile(previewLastFile.path, previewLastFile.name);
+        else document.getElementById('preview-content').innerHTML = '<div class="text-center py-16 mono text-[10px] text-on-surface-variant">SELECT A FILE</div>';
+    }
+
+    async function showProjectIssues() {
+        setPreviewTab('issues');
+        const p = previewProject;
+        const content = document.getElementById('preview-content');
+        document.getElementById('preview-file-meta').textContent = 'GITHUB ISSUES';
+        if (!p || !p.remoteUrl) { content.innerHTML = '<div class="text-center py-16 mono text-[10px] text-on-surface-variant">NO GITHUB REMOTE</div>'; return; }
+        if (previewIssuesData && !previewIssuesData.noRemote) { renderProjectIssues(previewIssuesData); return; }
+        content.innerHTML = '<div class="text-center py-8 mono text-[10px] text-on-surface-variant">LOADING…</div>';
+        try {
+            const data = await (await fetch('/api/project/issues?remote=' + encodeURIComponent(p.remoteUrl))).json();
+            if (previewProject !== p || previewTab !== 'issues') return;
+            previewIssuesData = data;
+            renderProjectIssues(data);
+        } catch (e) {
+            content.innerHTML = `<div class="text-error mono text-[10px] p-4">FETCH_FAILED: ${escapeHtml(String(e))}</div>`;
+        }
+    }
+
+    function renderProjectIssues(data) {
+        const content = document.getElementById('preview-content');
+        if (data.error) { content.innerHTML = `<div class="text-error mono text-[10px] p-4">${escapeHtml(data.error)}</div>`; return; }
+        const issues = data.issues || [];
+        if (!issues.length) { content.innerHTML = '<div class="text-center py-16 mono text-[10px] text-on-surface-variant">NO ISSUES FOR THIS PROJECT</div>'; return; }
+        const laneLabel = { todo: 'OPEN', doing: 'IN PROGRESS', done: 'CLOSED / DONE' };
+        const order = data.lanes || ['todo', 'doing', 'done'];
+        const groups = order.map(lane => {
+            const items = issues.filter(i => i.lane === lane);
+            if (!items.length) return '';
+            const rows = items.map(i => {
+                const closed = i.state === 'closed';
+                const labels = (i.labels || '').split(',').filter(Boolean)
+                    .map(l => `<span class="px-1 mono text-[9px] bg-surface-variant text-on-surface-variant rounded-sm">${escapeHtml(l.trim())}</span>`).join(' ');
+                return `<a href="${escapeHtml(i.url)}" target="_blank" rel="noopener" class="block border-l-2 ${closed ? 'border-l-primary' : 'border-l-tertiary'} bg-surface-dim hover:bg-surface-variant/50 border-y border-r border-outline-variant px-3 py-2 transition-colors">
+                    <div class="flex items-center justify-between gap-2">
+                        <span class="mono text-[10px] text-on-surface-variant">#${i.number}${i.author ? ' · ' + escapeHtml(i.author) : ''}</span>
+                        <span class="mono text-[9px] ${closed ? 'text-primary' : 'text-tertiary'}">${escapeHtml((i.state || '').toUpperCase())}</span>
+                    </div>
+                    <div class="text-[12px] text-on-surface leading-snug mt-0.5">${escapeHtml(i.title)}</div>
+                    ${labels ? `<div class="mt-1 flex flex-wrap gap-1">${labels}</div>` : ''}
+                    <div class="mono text-[9px] text-outline mt-1">updated ${escapeHtml((i.updatedAt || '').slice(0, 10))}</div>
+                </a>`;
+            }).join('');
+            return `<div class="mb-4"><div class="mono text-[10px] font-bold text-on-surface-variant mb-1.5">${laneLabel[lane] || lane.toUpperCase()} · ${items.length}</div><div class="flex flex-col gap-[3px]">${rows}</div></div>`;
+        }).join('');
+        content.innerHTML = `<div class="mono text-[11px] text-on-surface-variant mb-3 pb-2 border-b border-outline-variant">${data.open || 0} open · ${data.closed || 0} closed</div>${groups}`;
     }
 
     function renderPreviewBanner(p) {
@@ -1000,6 +1090,10 @@ user = "team_xxxxx"    # optional teamId for team-scoped accounts
         if (!previewProject) return;
         if (previewActiveEl) previewActiveEl.classList.remove('active');
         if (el) { el.classList.add('active'); previewActiveEl = el; }
+        // Clicking a file implies the FILES tab; remember it so toggling back
+        // from ISSUES restores this file.
+        previewLastFile = { path, name };
+        if (previewTab !== 'files') setPreviewTab('files');
 
         document.getElementById('preview-content').innerHTML = '<div class="text-center py-8 mono text-[10px] text-on-surface-variant">LOADING…</div>';
         document.getElementById('preview-file-meta').textContent = name;

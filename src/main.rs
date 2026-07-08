@@ -970,6 +970,42 @@ async fn deployments_api(State(state): State<AppState>) -> Json<serde_json::Valu
     }
 }
 
+#[derive(Deserialize)]
+struct ProjectIssuesQuery {
+    /// The project's git remote (any spelling). Canonicalized server-side to
+    /// `https://github.com/owner/repo` before lookup.
+    remote: String,
+}
+
+/// `GET /api/project/issues?remote=<url>` — the stored GitHub issues for a
+/// single project, open first, with open/closed counts. Backs the per-project
+/// drill-down in the dashboard preview pane. Non-GitHub remotes return empty.
+async fn project_issues_api(
+    axum::extract::Query(q): axum::extract::Query<ProjectIssuesQuery>,
+    State(state): State<AppState>,
+) -> Json<serde_json::Value> {
+    let canonical = match github::parse_owner_repo(&q.remote) {
+        Some((o, r)) => format!("https://github.com/{o}/{r}"),
+        None => {
+            return Json(serde_json::json!({
+                "issues": [], "lanes": github::LANES, "open": 0, "closed": 0
+            }))
+        }
+    };
+    let conn = state.db.lock().await;
+    match github::list_issue_views_for_remote(&conn, &canonical) {
+        Ok(views) => {
+            let open = views.iter().filter(|v| v.issue.state != "closed").count();
+            let closed = views.len() - open;
+            Json(serde_json::json!({
+                "remote": canonical, "lanes": github::LANES,
+                "issues": views, "open": open, "closed": closed
+            }))
+        }
+        Err(e) => Json(serde_json::json!({ "error": e, "issues": [], "lanes": github::LANES })),
+    }
+}
+
 /// `GET /api/issues` — every stored GitHub issue (PRs excluded) with its
 /// computed kanban lane, plus the ordered lane list. Read-only surface for the
 /// dashboard's kanban; populated by the GitHub-issues enrichment provider on
@@ -2062,6 +2098,7 @@ async fn main() {
                 .route("/api/survey/refresh", post(refresh_survey_api))
                 .route("/api/skills", get(skills_api))
                 .route("/api/issues", get(issues_api))
+                .route("/api/project/issues", get(project_issues_api))
                 .route("/api/deployments", get(deployments_api))
                 .route("/api/settings", get(settings_api).post(settings_update_api))
                 .route("/api/project/purge", post(purge_project_api))

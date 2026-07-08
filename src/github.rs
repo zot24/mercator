@@ -1,17 +1,26 @@
 //! GitHub **issue ingestion** — an [`Enrichment`] provider that surveys the
-//! issues of every surveyed GitHub repo and stores them for the dashboard's
-//! read-only kanban.
+//! issues of **your** GitHub repos and stores them for the dashboard's
+//! read-only kanban + per-project drill-down.
+//!
+//! "Your" repos = the ones the authenticated token can push to (owned, org,
+//! or collaborations). A repo-metadata pre-check ([`fetch_repo_meta`]) filters
+//! out read-only forks and repos with Issues disabled *before* fetching
+//! issues, so the board stays scoped to what you actually work on and no call
+//! is wasted 404ing on a disabled tracker.
 //!
 //! This is the write side the pre-existing scaffold in this file only sketched
 //! (it had read structs but no fetcher and targeted tables that were never
-//! created). It now owns the full loop: fetch (`reqwest`, paginated, same
-//! auth convention as `sources::fetch_github_repos` and `ticket.rs`), a pure
-//! JSON→[`Issue`] parse, persistence into `github_issues`/`github_remotes`
-//! (schema v6), and a pure state/label→[`kanban lane`](issue_lane) mapping.
+//! created). It now owns the full loop: repo pre-check + issue fetch
+//! (`reqwest`, paginated, same auth convention as `sources::fetch_github_repos`
+//! and `ticket.rs`), a pure JSON→[`Issue`] parse, persistence into
+//! `github_issues`/`github_remotes` (schema v6), and a pure state/label→[`kanban
+//! lane`](issue_lane) mapping.
 //!
-//! Kanban is read-only: cards link to the issue on GitHub. Columns are derived
-//! locally from issue state + a `status:` label convention (no GitHub
-//! Projects v2 dependency).
+//! Two read surfaces: [`list_issue_views`] powers the all-projects kanban
+//! (`/api/issues`), and [`list_issue_views_for_remote`] powers the per-project
+//! view (`/api/project/issues`). Both are read-only — cards link to GitHub.
+//! Columns derive locally from issue state + a `status:` label convention (no
+//! GitHub Projects v2 dependency).
 
 use crate::enrichment::{record_state, Enrichment, EnrichmentError, EnrichmentSummary};
 use crate::project::Project;
@@ -174,6 +183,77 @@ pub fn issues_from_json(remote_url: &str, body: &str) -> Result<Vec<Issue>, Enri
         .collect())
 }
 
+/// Minimal repo metadata used to decide whether a repo is "mine" and worth
+/// fetching issues for. `permissions` is only populated on authenticated
+/// requests — it reflects the token user's access to this repo.
+#[derive(serde::Deserialize)]
+struct RepoMeta {
+    #[serde(default = "default_true")]
+    has_issues: bool,
+    #[serde(default)]
+    permissions: Option<RepoPerms>,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct RepoPerms {
+    #[serde(default)]
+    push: bool,
+    #[serde(default)]
+    admin: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl RepoMeta {
+    /// True when the authenticated user can push (or admin) — the signal for
+    /// "this is one of my projects" that captures owned repos, org repos, and
+    /// collaborations while excluding read-only forks.
+    fn can_push(&self) -> bool {
+        self.permissions
+            .as_ref()
+            .map(|p| p.push || p.admin)
+            .unwrap_or(false)
+    }
+}
+
+async fn fetch_repo_meta(
+    client: &reqwest::Client,
+    owner: &str,
+    repo: &str,
+    token: Option<&str>,
+) -> Result<RepoMeta, EnrichmentError> {
+    let url = format!("https://api.github.com/repos/{owner}/{repo}");
+    let mut req = client
+        .get(&url)
+        .header("User-Agent", "Mercator/1.0")
+        .header("Accept", "application/vnd.github+json");
+    if let Some(t) = token {
+        req = req.header("Authorization", format!("Bearer {t}"));
+    }
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| EnrichmentError::Network(e.to_string()))?;
+    if !resp.status().is_success() {
+        let status = resp.status().as_u16();
+        let body: String = resp
+            .text()
+            .await
+            .unwrap_or_default()
+            .chars()
+            .take(200)
+            .collect();
+        return Err(EnrichmentError::Api { status, body });
+    }
+    let body = resp
+        .text()
+        .await
+        .map_err(|e| EnrichmentError::Network(e.to_string()))?;
+    serde_json::from_str(&body).map_err(|e| EnrichmentError::Parse(e.to_string()))
+}
+
 async fn fetch_repo_issues(
     client: &reqwest::Client,
     owner: &str,
@@ -291,18 +371,45 @@ pub fn persist_issues(
 }
 
 /// Read all stored issues (excluding PRs) with their computed kanban lane,
-/// for the `/api/issues` endpoint.
+/// for the `/api/issues` endpoint (the all-projects board).
 pub fn list_issue_views(conn: &Connection) -> Result<Vec<IssueView>, String> {
+    issue_views_query(
+        conn,
+        "SELECT remote_url, issue_number, title, state, author_login, assignees_csv,
+                labels_csv, is_pr, created_at, updated_at, closed_at, url
+         FROM github_issues WHERE is_pr = 0
+         ORDER BY remote_url, issue_number DESC",
+        [],
+    )
+}
+
+/// Read the stored issues (excluding PRs) for one repo, open first, for the
+/// per-project drill-down (`/api/project/issues`). `remote_url` must be the
+/// canonical `https://github.com/owner/repo`.
+pub fn list_issue_views_for_remote(
+    conn: &Connection,
+    remote_url: &str,
+) -> Result<Vec<IssueView>, String> {
+    issue_views_query(
+        conn,
+        "SELECT remote_url, issue_number, title, state, author_login, assignees_csv,
+                labels_csv, is_pr, created_at, updated_at, closed_at, url
+         FROM github_issues WHERE is_pr = 0 AND remote_url = ?1
+         ORDER BY (state = 'closed'), issue_number DESC",
+        [remote_url],
+    )
+}
+
+fn issue_views_query<P: rusqlite::Params>(
+    conn: &Connection,
+    sql: &str,
+    params: P,
+) -> Result<Vec<IssueView>, String> {
     let mut stmt = conn
-        .prepare(
-            "SELECT remote_url, issue_number, title, state, author_login, assignees_csv,
-                    labels_csv, is_pr, created_at, updated_at, closed_at, url
-             FROM github_issues WHERE is_pr = 0
-             ORDER BY remote_url, issue_number DESC",
-        )
-        .map_err(|e| format!("prepare list issues: {e}"))?;
+        .prepare(sql)
+        .map_err(|e| format!("prepare issues: {e}"))?;
     let rows = stmt
-        .query_map([], Issue::from_row)
+        .query_map(params, Issue::from_row)
         .map_err(|e| format!("query issues: {e}"))?;
     let mut out = Vec::new();
     for row in rows {
@@ -335,34 +442,59 @@ impl Enrichment for GithubIssuesEnrichment {
     ) -> Result<EnrichmentSummary, EnrichmentError> {
         let mut summary = EnrichmentSummary::new(self.name());
 
-        // Dedup targets by remote so a local clone + its fetched GitHub twin
-        // don't get surveyed twice.
-        // Dedup by owner/repo — a local clone and its GitHub twin resolve to
-        // the same repo. Everything downstream keys on the canonical
-        // `github.com/owner/repo`, so the two remote spellings collapse.
+        // Candidate repos: dedup by owner/repo. A local clone and its GitHub
+        // twin resolve to the same repo; everything downstream keys on the
+        // canonical `github.com/owner/repo`, so the two spellings collapse.
         let mut seen = std::collections::HashSet::new();
-        let targets: Vec<(String, String)> = projects
+        let candidates: Vec<(String, String)> = projects
             .iter()
             .filter(|p| self.applies_to(p))
             .filter_map(|p| p.remote_url.as_deref())
             .filter_map(parse_owner_repo)
             .filter(|(o, r)| seen.insert(format!("{o}/{r}")))
             .collect();
-        summary.projects_touched = targets.len();
-        if targets.is_empty() {
+        if candidates.is_empty() {
             return Ok(summary);
         }
 
         let token = self.token.as_deref();
         let client = reqwest::Client::new();
         let client = &client;
-        let fetches = targets
-            .iter()
-            .map(|(o, r)| async move { (o, r, fetch_repo_issues(client, o, r, token).await) });
-        let results = futures::future::join_all(fetches).await;
+
+        // Wave 1 — repo metadata. Keep only repos the authenticated user can
+        // push to ("my projects"), and among those only ones with Issues
+        // enabled. This excludes read-only forks (cnych/…, cohnen/…) and skips
+        // a wasted issues fetch (and 404) on issue-disabled repos.
+        let metas = futures::future::join_all(
+            candidates
+                .iter()
+                .map(|(o, r)| async move { (o, r, fetch_repo_meta(client, o, r, token).await) }),
+        )
+        .await;
+        let mut owned: Vec<(&String, &String)> = Vec::new();
+        for (o, r, res) in metas {
+            match res {
+                Ok(m) if m.can_push() => {
+                    if m.has_issues {
+                        owned.push((o, r));
+                    }
+                }
+                Ok(_) => {} // not mine (read-only) — skip silently
+                Err(EnrichmentError::Api { status: 404, .. }) => {} // gone / no access
+                Err(e) => summary.errors.push(format!("{o}/{r} meta: {e}")),
+            }
+        }
+        summary.projects_touched = owned.len();
+
+        // Wave 2 — issues for owned repos only.
+        let issue_results =
+            futures::future::join_all(owned.iter().map(|&(o, r)| async move {
+                (o, r, fetch_repo_issues(client, o, r, token).await)
+            }))
+            .await;
 
         let conn = crate::db::open(db_path).map_err(EnrichmentError::Config)?;
-        for (o, r, res) in results {
+        for (o, r, res) in issue_results {
             // Persist under the canonical remote — the same URL
             // `fetch_repo_issues` stamps on each Issue, so DELETE-then-INSERT
             // agree across runs regardless of the project's remote spelling.
@@ -446,6 +578,56 @@ mod tests {
         assert_eq!(issues[0].assignees_csv.as_deref(), Some("zot24,motty"));
         assert!(!issues[0].is_pr);
         assert!(issues[1].is_pr, "the pull_request key marks a PR");
+    }
+
+    #[test]
+    fn repo_meta_ownership_and_issues_flags() {
+        // Owned repo (push) with issues enabled → kept.
+        let mine: RepoMeta = serde_json::from_str(
+            r#"{"has_issues":true,"permissions":{"admin":true,"push":true,"pull":true}}"#,
+        )
+        .unwrap();
+        assert!(mine.can_push() && mine.has_issues);
+
+        // Read-only fork (pull only) → not mine.
+        let fork: RepoMeta = serde_json::from_str(
+            r#"{"has_issues":true,"permissions":{"admin":false,"push":false,"pull":true}}"#,
+        )
+        .unwrap();
+        assert!(!fork.can_push());
+
+        // No permissions block (unauthenticated shape) → not mine.
+        let anon: RepoMeta = serde_json::from_str(r#"{"has_issues":true}"#).unwrap();
+        assert!(!anon.can_push());
+
+        // has_issues defaults to true when GitHub omits it.
+        let bare: RepoMeta = serde_json::from_str(r#"{"permissions":{"push":true}}"#).unwrap();
+        assert!(bare.has_issues && bare.can_push());
+    }
+
+    #[test]
+    fn list_issue_views_for_remote_scopes_to_one_repo() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = crate::db::open(&dir.path().join("db.sqlite")).unwrap();
+        let mk = |ru: &str, num: i64, state: &str| {
+            issues_from_json(
+                ru,
+                &format!(
+                    r#"[{{"number":{num},"title":"t","state":"{state}","user":{{"login":"z"}},
+                        "created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z",
+                        "closed_at":null,"html_url":"{ru}/issues/{num}"}}]"#
+                ),
+            )
+            .unwrap()
+        };
+        let a = "https://github.com/zot24/mercator";
+        let b = "https://github.com/zot24/paraguayos";
+        persist_issues(&conn, a, "zot24", "mercator", &mk(a, 1, "open")).unwrap();
+        persist_issues(&conn, b, "zot24", "paraguayos", &mk(b, 2, "open")).unwrap();
+
+        let only_a = list_issue_views_for_remote(&conn, a).unwrap();
+        assert_eq!(only_a.len(), 1);
+        assert_eq!(only_a[0].issue.remote_url, a);
     }
 
     #[test]
