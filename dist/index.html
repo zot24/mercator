@@ -2078,6 +2078,7 @@ token = "glpat-xxxxx" # optional</pre>
                 <p class="text-[10px] text-on-surface-variant leading-snug flex-1 overflow-hidden" style="display:-webkit-box; -webkit-line-clamp:3; -webkit-box-orient:vertical;">${escapeHtml(truncDesc || 'No description')}</p>
                 <div class="flex items-center gap-1 mono text-[9px] flex-wrap">
                     <span class="px-1 border border-outline-variant ${tc}">${p.project_type}</span>
+                    ${deployTagHtml(p)}
                     ${tech}
                     ${cats}
                     ${isDirty ? '<span class="px-1 border border-error/30 text-error">DIRTY</span>' : ''}
