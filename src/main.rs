@@ -31,6 +31,8 @@
 mod agent;
 mod config;
 mod db;
+mod enrichment;
+mod github;
 mod markdown;
 mod project;
 mod readme;
@@ -539,6 +541,11 @@ struct AppState {
     /// fails. Wrapped in a tokio Mutex because `rusqlite::Connection` is
     /// `!Sync`; lock holds are short (a single SELECT).
     db: Arc<Mutex<rusqlite::Connection>>,
+    /// Path to the SQLite file backing `db`. Enrichment providers open their
+    /// own short-lived write connection from this (WAL makes that safe) so a
+    /// network fetch never holds the shared `db` lock. Read endpoints still
+    /// go through `db`.
+    db_path: PathBuf,
     /// Paths the dashboard's refresh button re-scans. Empty = refresh is a
     /// no-op (button just reloads the page). Configured via `serve --refresh`.
     refresh_paths: Vec<PathBuf>,
@@ -903,12 +910,40 @@ async fn refresh_survey_api(State(state): State<AppState>) -> Json<serde_json::V
             return Json(serde_json::json!({ "ok": false, "error": e }));
         }
     }
+
+    // Enrich the refreshed set with per-project child data (#8). Providers
+    // open their own write connection at `state.db_path`; the shared `db`
+    // lock is not held across their network I/O.
+    let github_token = {
+        let cfg = state.cfg.lock().await;
+        cfg.github.token().map(str::to_string)
+    };
+    let enrichers = enrichment::build_enrichments(github_token.as_deref());
+    let enrichment_summaries = if enrichers.is_empty() {
+        Vec::new()
+    } else {
+        enrichment::run_all(&state.db_path, &all, &enrichers).await
+    };
+
     Json(serde_json::json!({
         "ok": true,
         "total": all.len(),
         "per_path": per_path,
         "per_source": remote_per_source,
+        "enrichment": enrichment_summaries,
     }))
+}
+
+/// `GET /api/issues` — every stored GitHub issue (PRs excluded) with its
+/// computed kanban lane, plus the ordered lane list. Read-only surface for the
+/// dashboard's kanban; populated by the GitHub-issues enrichment provider on
+/// survey/refresh.
+async fn issues_api(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let conn = state.db.lock().await;
+    match github::list_issue_views(&conn) {
+        Ok(issues) => Json(serde_json::json!({ "lanes": github::LANES, "issues": issues })),
+        Err(e) => Json(serde_json::json!({ "error": e, "lanes": github::LANES, "issues": [] })),
+    }
 }
 
 /// `GET /api/settings` — return the current config minus secrets.
@@ -1547,6 +1582,28 @@ async fn main() {
                     Err(e) => eprintln!("  ⚠  db upsert failed: {}", e),
                 }
 
+                // Enrich the surveyed projects with per-project child data
+                // (#8) — runs after the project set is persisted so providers
+                // see a consistent DB. Each provider opens its own write
+                // connection; ours (`conn`) is idle here. Gated on the
+                // relevant token being configured (see `build_enrichments`).
+                let enrichers = enrichment::build_enrichments(github_token.as_deref());
+                if !enrichers.is_empty() {
+                    for s in enrichment::run_all(&db_path, &all_projects, &enrichers).await {
+                        eprintln!(
+                            "  enrich {}: {} projects, {} records{}",
+                            s.provider,
+                            s.projects_touched,
+                            s.records_upserted,
+                            if s.errors.is_empty() {
+                                String::new()
+                            } else {
+                                format!(", {} error(s): {}", s.errors.len(), s.errors.join("; "))
+                            }
+                        );
+                    }
+                }
+
                 match watch {
                     Some(minutes) => {
                         eprintln!("Next scan in {} min. Press Ctrl+C to stop.", minutes);
@@ -1890,6 +1947,7 @@ async fn main() {
                 task_handles: Arc::new(Mutex::new(std::collections::HashMap::new())),
                 map_file: map_file.clone(),
                 db: db_handle,
+                db_path: db_path.clone(),
                 refresh_paths: refresh,
                 cfg: Arc::new(Mutex::new(cfg)),
             };
@@ -1906,6 +1964,7 @@ async fn main() {
                 .route("/api/categorize", post(recategorize_api))
                 .route("/api/survey/refresh", post(refresh_survey_api))
                 .route("/api/skills", get(skills_api))
+                .route("/api/issues", get(issues_api))
                 .route("/api/settings", get(settings_api).post(settings_update_api))
                 .route("/api/project/purge", post(purge_project_api))
                 .route("/api/project/restore", post(restore_project_api))

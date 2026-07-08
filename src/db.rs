@@ -233,6 +233,13 @@ pub fn open(path: &Path) -> Result<Connection, String> {
     let conn = Connection::open(path).map_err(|e| format!("open db {}: {}", path.display(), e))?;
     conn.execute_batch("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;")
         .map_err(|e| format!("set pragmas: {}", e))?;
+    // Enrichment providers open their own short-lived connection to write
+    // child data (issues, deployments) while `serve`/`survey` hold another
+    // handle. WAL lets readers proceed during a write, but only one writer
+    // runs at a time — a 5s busy timeout makes a concurrent writer wait and
+    // retry instead of failing immediately with SQLITE_BUSY.
+    conn.busy_timeout(std::time::Duration::from_secs(5))
+        .map_err(|e| format!("set busy_timeout: {}", e))?;
     conn.execute_batch(SCHEMA_V1)
         .map_err(|e| format!("apply schema v1: {}", e))?;
 
@@ -1664,13 +1671,13 @@ mod tests {
         }
 
         // Re-open via the public API — this runs v2 (rebuild FTS), v3
-        // (active_projects), v4 (git_ahead/git_behind) and v5
-        // (local_tickets) in sequence, leaving user_version at 5.
+        // (active_projects), v4 (git_ahead/git_behind), v5 (local_tickets)
+        // and v6 (enrichment tables) in sequence, leaving user_version at 6.
         let conn = open(&path).unwrap();
         assert_eq!(
             conn.query_row::<i64, _, _>("PRAGMA user_version", [], |r| r.get(0))
                 .unwrap(),
-            5
+            6
         );
         let hits = search_projects(&conn, "v1").unwrap();
         assert_eq!(hits.len(), 1);
@@ -1862,9 +1869,9 @@ mod tests {
         let v: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        // open() now also runs v4 (git_ahead/git_behind) and v5
-        // (local_tickets).
-        assert_eq!(v, 5);
+        // open() now also runs v4 (git_ahead/git_behind), v5
+        // (local_tickets) and v6 (enrichment tables).
+        assert_eq!(v, 6);
         // Table is present and usable.
         add_active(&conn, "/tmp/x", None).unwrap();
         assert_eq!(count_active(&conn).unwrap(), 1);
