@@ -261,6 +261,7 @@
             <button id="view-list" onclick="setView('list')" class="px-3 py-1 text-[10px] mono font-medium bg-surface-variant text-on-surface">LIST</button>
             <button id="view-blocks" onclick="setView('blocks')" class="px-3 py-1 text-[10px] mono font-medium bg-surface-dim text-on-surface-variant hover:text-on-surface">BLOCKS</button>
             <button id="view-graph" onclick="setView('graph')" class="px-3 py-1 text-[10px] mono font-medium bg-surface-dim text-on-surface-variant hover:text-on-surface">GRAPH</button>
+            <button id="view-kanban" onclick="setView('kanban')" class="px-3 py-1 text-[10px] mono font-medium bg-surface-dim text-on-surface-variant hover:text-on-surface">KANBAN</button>
         </div>
     </div>
 
@@ -274,6 +275,9 @@
     <div id="graph-container" class="hidden" style="width:100%; height: calc(100vh - 8rem);">
         <svg id="graph-svg" width="100%" height="100%"></svg>
     </div>
+
+    <!-- Kanban View (GitHub issues across all repos, read-only) -->
+    <div id="kanban-container" class="hidden"></div>
 
     <!-- Graph Tooltip -->
     <div id="graph-tooltip" class="fixed hidden bg-surface-dim border border-outline-variant p-3 z-[999] max-w-xs pointer-events-none" style="backdrop-filter: blur(10px);">
@@ -622,10 +626,16 @@ mercator export --obsidian-vault ~/Desktop/brain --obsidian-folder Mercator</pre
             <pre class="mono text-[10px] text-on-surface bg-surface-dim border border-outline-variant rounded p-3 overflow-x-auto">[github]
 user = "zot24"
 token = "ghp_xxxxx"   # optional — public repos work without it (60/hr cap)
+owned_only = true     # only ingest issues from repos you own/admin (drop push-only collabs)
+owners = ["zot24", "motty"]  # optional: restrict issue ingestion to these owners
 
 [gitlab]
 user = "zot24"
-token = "glpat-xxxxx" # optional</pre>
+token = "glpat-xxxxx" # optional
+
+[vercel]
+token = "vercel_xxxxx" # deploy-status badges + kanban enrichment (#8)
+user = "team_xxxxx"    # optional teamId for team-scoped accounts
             <p class="text-[11px] leading-relaxed text-on-surface-variant mt-3">
                 You can also edit it from the <button onclick="closeDocsView(); openSettings();" class="text-primary hover:underline">settings panel</button> — tokens never appear in the response from <code>GET /api/settings</code>, only a <code>*_token_set</code> boolean for the "you have a token configured" hint.
             </p>
@@ -656,6 +666,8 @@ token = "glpat-xxxxx" # optional</pre>
                 <span id="preview-banner" class="mono text-[10px] flex-shrink-0 ml-2"></span>
             </div>
             <div class="flex items-center gap-2 flex-shrink-0">
+                <button id="preview-files-btn" onclick="showProjectFiles()" class="mono text-[10px] px-2 py-1 border border-primary/50 text-primary transition-colors">FILES</button>
+                <button id="preview-issues-btn" onclick="showProjectIssues()" class="mono text-[10px] px-2 py-1 border border-outline-variant hover:border-secondary text-on-surface-variant hover:text-secondary transition-colors">ISSUES</button>
                 <a id="preview-ide" target="_blank" class="mono text-[10px] px-2 py-1 border border-outline-variant hover:border-primary text-on-surface-variant hover:text-primary transition-colors">IDE</a>
                 <button id="preview-claude" class="mono text-[10px] px-2 py-1 border border-outline-variant hover:border-claude-orange text-on-surface-variant hover:text-claude-orange transition-colors">CLAUDE</button>
                 <button onclick="closePreview()" class="material-symbols-outlined text-on-surface-variant hover:text-on-surface text-[20px]">close</button>
@@ -839,9 +851,19 @@ token = "glpat-xxxxx" # optional</pre>
         if (p) switchPreviewProject(p);
     }
 
+    // Per-project preview tab state ('files' | 'issues'), the last opened file
+    // (so switching back to FILES restores it), and cached issues for the
+    // open project (fetched once on open so the count badge + panel are instant).
+    let previewTab = 'files';
+    let previewLastFile = null;
+    let previewIssuesData = null;
+
     function switchPreviewProject(p) {
         previewProject = p;
         previewActiveEl = null;
+        previewLastFile = null;
+        previewIssuesData = null;
+        setPreviewTab('files');
         document.getElementById('preview-title').textContent = p.name.toUpperCase();
         document.getElementById('preview-path').textContent = p.path;
         document.getElementById('preview-ide').href = 'vscode://file/' + encodeURIComponent(p.path);
@@ -851,6 +873,7 @@ token = "glpat-xxxxx" # optional</pre>
         document.getElementById('preview-file-meta').textContent = '—';
         renderPreviewBanner(p);
         renderPreviewProjectList();
+        loadProjectIssuesCount(p);
 
         fetch('/api/project/tree?path=' + encodeURIComponent(p.path))
             .then(r => r.json())
@@ -873,6 +896,83 @@ token = "glpat-xxxxx" # optional</pre>
                     document.getElementById('preview-file-meta').textContent = '—';
                 }
             });
+    }
+
+    // ── Per-project GitHub issues (preview FILES/ISSUES tabs) ───────────
+    function setPreviewTab(tab) {
+        previewTab = tab;
+        const filesBtn = document.getElementById('preview-files-btn');
+        const issuesBtn = document.getElementById('preview-issues-btn');
+        if (filesBtn) filesBtn.className = `mono text-[10px] px-2 py-1 border ${tab === 'files' ? 'border-primary/50 text-primary' : 'border-outline-variant hover:border-primary text-on-surface-variant hover:text-primary'} transition-colors`;
+        if (issuesBtn) issuesBtn.className = `mono text-[10px] px-2 py-1 border ${tab === 'issues' ? 'border-secondary text-secondary' : 'border-outline-variant hover:border-secondary text-on-surface-variant hover:text-secondary'} transition-colors`;
+    }
+
+    async function loadProjectIssuesCount(p) {
+        const btn = document.getElementById('preview-issues-btn');
+        if (!btn) return;
+        btn.textContent = 'ISSUES';
+        if (!p.remoteUrl) { previewIssuesData = { issues: [], open: 0, closed: 0, noRemote: true }; return; }
+        try {
+            const data = await (await fetch('/api/project/issues?remote=' + encodeURIComponent(p.remoteUrl))).json();
+            if (previewProject !== p) return;
+            previewIssuesData = data;
+            const total = (data.open || 0) + (data.closed || 0);
+            btn.textContent = total ? `ISSUES · ${total}` : 'ISSUES';
+        } catch (e) { /* count badge is best-effort */ }
+    }
+
+    function showProjectFiles() {
+        setPreviewTab('files');
+        document.getElementById('preview-file-meta').textContent = previewLastFile ? previewLastFile.name : '—';
+        if (previewLastFile) openPreviewFile(previewLastFile.path, previewLastFile.name);
+        else document.getElementById('preview-content').innerHTML = '<div class="text-center py-16 mono text-[10px] text-on-surface-variant">SELECT A FILE</div>';
+    }
+
+    async function showProjectIssues() {
+        setPreviewTab('issues');
+        const p = previewProject;
+        const content = document.getElementById('preview-content');
+        document.getElementById('preview-file-meta').textContent = 'GITHUB ISSUES';
+        if (!p || !p.remoteUrl) { content.innerHTML = '<div class="text-center py-16 mono text-[10px] text-on-surface-variant">NO GITHUB REMOTE</div>'; return; }
+        if (previewIssuesData && !previewIssuesData.noRemote) { renderProjectIssues(previewIssuesData); return; }
+        content.innerHTML = '<div class="text-center py-8 mono text-[10px] text-on-surface-variant">LOADING…</div>';
+        try {
+            const data = await (await fetch('/api/project/issues?remote=' + encodeURIComponent(p.remoteUrl))).json();
+            if (previewProject !== p || previewTab !== 'issues') return;
+            previewIssuesData = data;
+            renderProjectIssues(data);
+        } catch (e) {
+            content.innerHTML = `<div class="text-error mono text-[10px] p-4">FETCH_FAILED: ${escapeHtml(String(e))}</div>`;
+        }
+    }
+
+    function renderProjectIssues(data) {
+        const content = document.getElementById('preview-content');
+        if (data.error) { content.innerHTML = `<div class="text-error mono text-[10px] p-4">${escapeHtml(data.error)}</div>`; return; }
+        const issues = data.issues || [];
+        if (!issues.length) { content.innerHTML = '<div class="text-center py-16 mono text-[10px] text-on-surface-variant">NO ISSUES FOR THIS PROJECT</div>'; return; }
+        const laneLabel = { todo: 'OPEN', doing: 'IN PROGRESS', done: 'CLOSED / DONE' };
+        const order = data.lanes || ['todo', 'doing', 'done'];
+        const groups = order.map(lane => {
+            const items = issues.filter(i => i.lane === lane);
+            if (!items.length) return '';
+            const rows = items.map(i => {
+                const closed = i.state === 'closed';
+                const labels = (i.labels || '').split(',').filter(Boolean)
+                    .map(l => `<span class="px-1 mono text-[9px] bg-surface-variant text-on-surface-variant rounded-sm">${escapeHtml(l.trim())}</span>`).join(' ');
+                return `<a href="${escapeHtml(i.url)}" target="_blank" rel="noopener" class="block border-l-2 ${closed ? 'border-l-primary' : 'border-l-tertiary'} bg-surface-dim hover:bg-surface-variant/50 border-y border-r border-outline-variant px-3 py-2 transition-colors">
+                    <div class="flex items-center justify-between gap-2">
+                        <span class="mono text-[10px] text-on-surface-variant">#${i.number}${i.author ? ' · ' + escapeHtml(i.author) : ''}</span>
+                        <span class="mono text-[9px] ${closed ? 'text-primary' : 'text-tertiary'}">${escapeHtml((i.state || '').toUpperCase())}</span>
+                    </div>
+                    <div class="text-[12px] text-on-surface leading-snug mt-0.5">${escapeHtml(i.title)}</div>
+                    ${labels ? `<div class="mt-1 flex flex-wrap gap-1">${labels}</div>` : ''}
+                    <div class="mono text-[9px] text-outline mt-1">updated ${escapeHtml((i.updatedAt || '').slice(0, 10))}</div>
+                </a>`;
+            }).join('');
+            return `<div class="mb-4"><div class="mono text-[10px] font-bold text-on-surface-variant mb-1.5">${laneLabel[lane] || lane.toUpperCase()} · ${items.length}</div><div class="flex flex-col gap-[3px]">${rows}</div></div>`;
+        }).join('');
+        content.innerHTML = `<div class="mono text-[11px] text-on-surface-variant mb-3 pb-2 border-b border-outline-variant">${data.open || 0} open · ${data.closed || 0} closed</div>${groups}`;
     }
 
     function renderPreviewBanner(p) {
@@ -992,6 +1092,10 @@ token = "glpat-xxxxx" # optional</pre>
         if (!previewProject) return;
         if (previewActiveEl) previewActiveEl.classList.remove('active');
         if (el) { el.classList.add('active'); previewActiveEl = el; }
+        // Clicking a file implies the FILES tab; remember it so toggling back
+        // from ISSUES restores this file.
+        previewLastFile = { path, name };
+        if (previewTab !== 'files') setPreviewTab('files');
 
         document.getElementById('preview-content').innerHTML = '<div class="text-center py-8 mono text-[10px] text-on-surface-variant">LOADING…</div>';
         document.getElementById('preview-file-meta').textContent = name;
@@ -1714,6 +1818,37 @@ token = "glpat-xxxxx" # optional</pre>
         return sortProjects(filtered, document.getElementById('sort').value);
     }
 
+    // ── Vercel deploy badges ────────────────────────────────────────────
+    // /api/deployments gives the latest deploy per project, keyed by remoteUrl.
+    // We badge each project row/block whose remoteUrl matches.
+    let deployByRemote = {};
+    const DEPLOY_COLOR = {
+        READY: 'border-primary/40 text-primary',
+        ERROR: 'border-error/40 text-error',
+        BUILDING: 'border-claude-orange/40 text-claude-orange',
+        QUEUED: 'border-claude-orange/40 text-claude-orange',
+        INITIALIZING: 'border-claude-orange/40 text-claude-orange',
+        CANCELED: 'border-outline text-on-surface-variant',
+    };
+    function deployTagHtml(p) {
+        const d = p && p.remoteUrl ? deployByRemote[p.remoteUrl] : null;
+        if (!d) return '';
+        const cls = DEPLOY_COLOR[d.state] || 'border-outline text-on-surface-variant';
+        const href = d.inspectorUrl || d.url || '#';
+        const title = `Vercel deploy: ${d.state}${d.target ? ' (' + d.target + ')' : ''}`;
+        return `<a href="${escapeHtml(href)}" target="_blank" rel="noopener" onclick="event.stopPropagation()" class="px-1 border ${cls} cursor-pointer" title="${escapeHtml(title)}">▲ ${escapeHtml(d.state)}</a>`;
+    }
+    async function loadDeployments() {
+        try {
+            const res = await fetch('/api/deployments');
+            const data = await res.json();
+            deployByRemote = {};
+            (data.deployments || []).forEach(d => { if (d.remoteUrl) deployByRemote[d.remoteUrl] = d; });
+            if (currentView === 'list') renderProjects();
+            else if (currentView === 'blocks') renderBlocks();
+        } catch (e) { /* deploy badges are best-effort; ignore */ }
+    }
+
     function renderProjects() {
         if (currentView === 'blocks') return renderBlocks();
         let filtered = getFilteredProjects();
@@ -1821,6 +1956,7 @@ token = "glpat-xxxxx" # optional</pre>
                                 ${(branchTag || p.lastCommit) && (techTags || agentTag || catTags) ? '<span>·</span>' : ''}
                                 <div class="flex gap-1 flex-wrap">
                                     <span class="px-1 border border-outline-variant ${tc}">${p.project_type}</span>
+                                    ${deployTagHtml(p)}
                                     ${agentTag}
                                     ${techTags}
                                     ${catTags}
@@ -1894,9 +2030,11 @@ token = "glpat-xxxxx" # optional</pre>
         setBtn('view-list', view === 'list');
         setBtn('view-blocks', view === 'blocks');
         setBtn('view-graph', view === 'graph');
+        setBtn('view-kanban', view === 'kanban');
         document.getElementById('map').classList.toggle('hidden', view !== 'list');
         document.getElementById('blocks-container').classList.toggle('hidden', view !== 'blocks');
         document.getElementById('graph-container').classList.toggle('hidden', view !== 'graph');
+        document.getElementById('kanban-container').classList.toggle('hidden', view !== 'kanban');
         if (view === 'blocks') {
             renderBlocks();
         } else if (view === 'graph' && !graphData) {
@@ -1905,7 +2043,83 @@ token = "glpat-xxxxx" # optional</pre>
             renderGraph(graphData);
         } else if (view === 'list') {
             renderProjects();
+        } else if (view === 'kanban') {
+            loadKanban();
         }
+    }
+
+    // ── Kanban (GitHub issues) ──────────────────────────────────────────
+    // Read-only board fed by /api/issues. Columns come from the server's
+    // lane list; each card links to the issue on GitHub. Issues are grouped
+    // by repo within a lane so the cross-project picture stays legible.
+    const LANE_LABELS = { todo: 'TODO', doing: 'IN PROGRESS', done: 'DONE' };
+    const LANE_ACCENT = {
+        todo: 'border-l-outline',
+        doing: 'border-l-tertiary',
+        done: 'border-l-primary',
+    };
+
+    function repoSlug(remoteUrl) {
+        // https://github.com/owner/repo -> owner/repo
+        const m = (remoteUrl || '').match(/github\.com[/:]([^/]+\/[^/]+?)(?:\.git)?$/i);
+        return m ? m[1] : (remoteUrl || 'unknown');
+    }
+
+    async function loadKanban() {
+        const container = document.getElementById('kanban-container');
+        container.innerHTML = '<div class="text-center py-16 mono text-sm text-on-surface-variant">LOADING_ISSUES…</div>';
+        let data;
+        try {
+            const res = await fetch('/api/issues');
+            data = await res.json();
+        } catch (e) {
+            container.innerHTML = `<div class="text-center py-16 mono text-sm text-error">FETCH_FAILED: ${escapeHtml(String(e))}</div>`;
+            return;
+        }
+        renderKanban(data);
+    }
+
+    function renderKanban(data) {
+        const container = document.getElementById('kanban-container');
+        const lanes = (data && data.lanes) || ['todo', 'doing', 'done'];
+        const issues = (data && data.issues) || [];
+
+        if (data && data.error) {
+            container.innerHTML = `<div class="text-center py-16 mono text-sm text-error">${escapeHtml(data.error)}</div>`;
+            return;
+        }
+        if (issues.length === 0) {
+            container.innerHTML = '<div class="text-center py-16 mono text-sm text-on-surface-variant">NO_ISSUES — run a survey with a GitHub token configured to populate the board.</div>';
+            return;
+        }
+
+        const byLane = {};
+        lanes.forEach(l => { byLane[l] = []; });
+        issues.forEach(i => { (byLane[i.lane] || (byLane[i.lane] = [])).push(i); });
+
+        const cols = lanes.map(lane => {
+            const items = byLane[lane] || [];
+            const cards = items.map(i => {
+                const labels = (i.labels || '').split(',').filter(Boolean)
+                    .map(l => `<span class="inline-block px-1 mono text-[9px] bg-surface-variant text-on-surface-variant rounded-sm">${escapeHtml(l.trim())}</span>`)
+                    .join(' ');
+                return `<a href="${escapeHtml(i.url)}" target="_blank" rel="noopener"
+                    class="block bg-surface-dim border-l-2 ${LANE_ACCENT[lane] || 'border-l-outline'} border-y border-r border-outline-variant p-2 hover:bg-surface-variant/50 transition-colors">
+                    <div class="mono text-[10px] text-on-surface-variant mb-0.5">${escapeHtml(repoSlug(i.remoteUrl))} #${i.number}</div>
+                    <div class="text-[12px] text-on-surface leading-snug">${escapeHtml(i.title)}</div>
+                    ${labels ? `<div class="mt-1 flex flex-wrap gap-1">${labels}</div>` : ''}
+                </a>`;
+            }).join('');
+            return `<div class="flex-1 min-w-[240px] flex flex-col gap-[3px]">
+                <div class="mono text-[10px] font-bold text-on-surface-variant px-1 py-1 flex items-center justify-between">
+                    <span>${LANE_LABELS[lane] || lane.toUpperCase()}</span>
+                    <span class="text-on-surface-variant/60">${items.length}</span>
+                </div>
+                ${cards || '<div class="mono text-[10px] text-on-surface-variant/50 px-1 py-4 text-center">—</div>'}
+            </div>`;
+        }).join('');
+
+        container.innerHTML = `<div class="flex gap-3 items-start overflow-x-auto pb-4">${cols}</div>`;
     }
 
     const blockBorder = {
@@ -1964,6 +2178,7 @@ token = "glpat-xxxxx" # optional</pre>
                 <p class="text-[10px] text-on-surface-variant leading-snug flex-1 overflow-hidden" style="display:-webkit-box; -webkit-line-clamp:3; -webkit-box-orient:vertical;">${escapeHtml(truncDesc || 'No description')}</p>
                 <div class="flex items-center gap-1 mono text-[9px] flex-wrap">
                     <span class="px-1 border border-outline-variant ${tc}">${p.project_type}</span>
+                    ${deployTagHtml(p)}
                     ${tech}
                     ${cats}
                     ${isDirty ? '<span class="px-1 border border-error/30 text-error">DIRTY</span>' : ''}
@@ -2211,6 +2426,7 @@ token = "glpat-xxxxx" # optional</pre>
             renderCategoryList();
             updateCounts();
             renderProjects();
+            loadDeployments();
         })
         .catch(() => {
             document.getElementById('map').innerHTML = '<div class="text-center py-16 mono text-sm text-on-surface-variant">ERROR: RUN "mercator survey" FIRST</div>';

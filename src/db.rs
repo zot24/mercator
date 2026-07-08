@@ -155,6 +155,71 @@ CREATE TABLE IF NOT EXISTS local_tickets (
 );
 "#;
 
+/// Schema v6: per-project **enrichment** child data, keyed by `remote_url`
+/// (a project's git remote), plus provider bookkeeping. This is the storage
+/// half of the `Enrichment` plug-point (issue #8): the `Source` trait
+/// discovers *projects*; enrichment providers attach *child data* to them.
+///
+/// - `github_remotes` / `github_issues` — populated by the GitHub-issues
+///   provider and read back by the pre-existing readers in `src/github.rs`.
+///   `github_issues`' column order matches `Issue::from_row` there.
+/// - `vercel_deployments` — the latest deploy per project. Vercel-shaped
+///   (state/target/inspector_url), **not** GitHub's Deployments-API shape.
+/// - `enrichment_state` — one row per (provider, scope): last run time,
+///   success flag, and last error, so the dashboard can surface sync health.
+///
+/// All four are path/FK-free (joined by `remote_url` string) for the same
+/// reason as `active_projects`/`local_tickets`: an enrichment may reference
+/// a project that a later re-survey replaces or that isn't surveyed yet.
+const SCHEMA_V6: &str = r#"
+CREATE TABLE IF NOT EXISTS github_remotes (
+    remote_url TEXT PRIMARY KEY,
+    owner TEXT NOT NULL,
+    repo TEXT NOT NULL,
+    last_refreshed TEXT
+);
+
+CREATE TABLE IF NOT EXISTS github_issues (
+    remote_url TEXT NOT NULL,
+    issue_number INTEGER NOT NULL,
+    title TEXT NOT NULL,
+    state TEXT NOT NULL,
+    author_login TEXT,
+    assignees_csv TEXT,
+    labels_csv TEXT,
+    is_pr INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    closed_at TEXT,
+    url TEXT NOT NULL,
+    PRIMARY KEY (remote_url, issue_number)
+);
+
+CREATE TABLE IF NOT EXISTS vercel_deployments (
+    uid TEXT PRIMARY KEY,
+    remote_url TEXT,
+    project_name TEXT NOT NULL,
+    state TEXT NOT NULL,
+    target TEXT,
+    url TEXT,
+    branch TEXT,
+    commit_sha TEXT,
+    commit_message TEXT,
+    created_at TEXT,
+    ready_at TEXT,
+    inspector_url TEXT
+);
+
+CREATE TABLE IF NOT EXISTS enrichment_state (
+    provider TEXT NOT NULL,
+    scope TEXT NOT NULL,
+    last_refreshed TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    ok INTEGER NOT NULL DEFAULT 1,
+    error TEXT,
+    PRIMARY KEY (provider, scope)
+);
+"#;
+
 /// Open or create a SQLite database at `path`, apply the schema, and
 /// migrate to the latest version.
 ///
@@ -168,6 +233,13 @@ pub fn open(path: &Path) -> Result<Connection, String> {
     let conn = Connection::open(path).map_err(|e| format!("open db {}: {}", path.display(), e))?;
     conn.execute_batch("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;")
         .map_err(|e| format!("set pragmas: {}", e))?;
+    // Enrichment providers open their own short-lived connection to write
+    // child data (issues, deployments) while `serve`/`survey` hold another
+    // handle. WAL lets readers proceed during a write, but only one writer
+    // runs at a time — a 5s busy timeout makes a concurrent writer wait and
+    // retry instead of failing immediately with SQLITE_BUSY.
+    conn.busy_timeout(std::time::Duration::from_secs(5))
+        .map_err(|e| format!("set busy_timeout: {}", e))?;
     conn.execute_batch(SCHEMA_V1)
         .map_err(|e| format!("apply schema v1: {}", e))?;
 
@@ -199,6 +271,12 @@ pub fn open(path: &Path) -> Result<Connection, String> {
             .map_err(|e| format!("apply schema v5: {}", e))?;
         conn.execute_batch("PRAGMA user_version = 5;")
             .map_err(|e| format!("bump user_version to 5: {}", e))?;
+    }
+    if user_version < 6 {
+        conn.execute_batch(SCHEMA_V6)
+            .map_err(|e| format!("apply schema v6: {}", e))?;
+        conn.execute_batch("PRAGMA user_version = 6;")
+            .map_err(|e| format!("bump user_version to 6: {}", e))?;
     }
     Ok(conn)
 }
@@ -923,7 +1001,7 @@ mod tests {
         let v: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 5);
+        assert_eq!(v, 6);
         let names: Vec<String> = conn
             .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
             .unwrap()
@@ -933,6 +1011,9 @@ mod tests {
             .unwrap();
         for expected in [
             "active_projects",
+            "enrichment_state",
+            "github_issues",
+            "github_remotes",
             "local_tickets",
             "obsidian_links",
             "project_tags",
@@ -942,6 +1023,7 @@ mod tests {
             "purged",
             "tags",
             "tech_stack",
+            "vercel_deployments",
         ] {
             assert!(
                 names.contains(&expected.to_string()),
@@ -974,6 +1056,73 @@ mod tests {
         assert!(
             created.contains('T') && created.ends_with('Z'),
             "unexpected created_at {created:?}"
+        );
+    }
+
+    #[test]
+    fn schema_v6_creates_enrichment_tables() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = open(&dir.path().join("db.sqlite")).unwrap();
+
+        // github_issues column order must satisfy the read query in
+        // src/github.rs (Issue::from_row reads positionally). A bare insert
+        // of a full row, then the exact SELECT that reader uses, must work.
+        conn.execute(
+            "INSERT INTO github_remotes (remote_url, owner, repo) VALUES ('https://github.com/zot24/mercator', 'zot24', 'mercator')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO github_issues \
+             (remote_url, issue_number, title, state, author_login, assignees_csv, labels_csv, is_pr, created_at, updated_at, closed_at, url) \
+             VALUES ('https://github.com/zot24/mercator', 8, 'Deploy-target integrations', 'open', 'zot24', NULL, 'enhancement', 0, '2026-01-01T00:00:00Z', '2026-01-02T00:00:00Z', NULL, 'https://github.com/zot24/mercator/issues/8')",
+            [],
+        )
+        .unwrap();
+        let (num, title, is_pr): (i64, String, i64) = conn
+            .query_row(
+                "SELECT issue_number, title, is_pr FROM github_issues WHERE remote_url = ? ORDER BY issue_number DESC",
+                ["https://github.com/zot24/mercator"],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(num, 8);
+        assert_eq!(title, "Deploy-target integrations");
+        assert_eq!(is_pr, 0);
+
+        // vercel_deployments: latest-deploy row keyed by uid, joined by remote_url.
+        conn.execute(
+            "INSERT INTO vercel_deployments (uid, remote_url, project_name, state, target, url) \
+             VALUES ('dpl_abc', 'https://github.com/zot24/paraguayos', 'paraguayos', 'READY', 'production', 'paraguayos.vercel.app')",
+            [],
+        )
+        .unwrap();
+        let state: String = conn
+            .query_row(
+                "SELECT state FROM vercel_deployments WHERE remote_url = ?",
+                ["https://github.com/zot24/paraguayos"],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(state, "READY");
+
+        // enrichment_state: bare insert relying on default timestamp + ok flag.
+        conn.execute(
+            "INSERT INTO enrichment_state (provider, scope) VALUES ('Vercel', 'all')",
+            [],
+        )
+        .unwrap();
+        let (ok, refreshed): (i64, String) = conn
+            .query_row(
+                "SELECT ok, last_refreshed FROM enrichment_state WHERE provider = 'Vercel' AND scope = 'all'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(ok, 1);
+        assert!(
+            refreshed.contains('T') && refreshed.ends_with('Z'),
+            "unexpected last_refreshed {refreshed:?}"
         );
     }
 
@@ -1239,9 +1388,9 @@ mod tests {
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
         // Later migrations (v3 active_projects, v4 git_ahead, v5
-        // local_tickets) supersede v2 — the FTS table created by the v2
-        // step must still survive.
-        assert_eq!(v, 5);
+        // local_tickets, v6 enrichment tables) supersede v2 — the FTS
+        // table created by the v2 step must still survive.
+        assert_eq!(v, 6);
         let exists: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='projects_fts'",
@@ -1522,13 +1671,13 @@ mod tests {
         }
 
         // Re-open via the public API — this runs v2 (rebuild FTS), v3
-        // (active_projects), v4 (git_ahead/git_behind) and v5
-        // (local_tickets) in sequence, leaving user_version at 5.
+        // (active_projects), v4 (git_ahead/git_behind), v5 (local_tickets)
+        // and v6 (enrichment tables) in sequence, leaving user_version at 6.
         let conn = open(&path).unwrap();
         assert_eq!(
             conn.query_row::<i64, _, _>("PRAGMA user_version", [], |r| r.get(0))
                 .unwrap(),
-            5
+            6
         );
         let hits = search_projects(&conn, "v1").unwrap();
         assert_eq!(hits.len(), 1);
@@ -1720,9 +1869,9 @@ mod tests {
         let v: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        // open() now also runs v4 (git_ahead/git_behind) and v5
-        // (local_tickets).
-        assert_eq!(v, 5);
+        // open() now also runs v4 (git_ahead/git_behind), v5
+        // (local_tickets) and v6 (enrichment tables).
+        assert_eq!(v, 6);
         // Table is present and usable.
         add_active(&conn, "/tmp/x", None).unwrap();
         assert_eq!(count_active(&conn).unwrap(), 1);

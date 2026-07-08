@@ -15,7 +15,7 @@
 ## Phase 2 — Make it smart
 
 - [ ] LLM synthesis per project ("where I left off" stops being a stub)
-- [ ] Deployment status (Vercel, Supabase, Turso) on the same screen as the code — [#8](https://github.com/zot24/mercator/issues/8); the `Source` trait from #9 is the plug-point this uses
+- [~] Deployment status (Vercel, Supabase, Turso) on the same screen as the code — [#8](https://github.com/zot24/mercator/issues/8). **Vercel deploy badges + a GitHub-issues kanban shipped** via a new *enrichment* plug-point (the `Source` trait handles projects; enrichment handles per-project child data). Supabase/Turso still pending.
 - [ ] Smarter graph — semantic edges, not keyword overlap — [#27](https://github.com/zot24/mercator/issues/27)
 - [ ] Mercator export feeds my Obsidian LLM-wiki, maintained by Claude Code — [#22](https://github.com/zot24/mercator/issues/22)
 - [ ] Cost visibility — at minimum dev-time AI spend per project (already in swarm logs) — [#28](https://github.com/zot24/mercator/issues/28)

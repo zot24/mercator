@@ -31,6 +31,8 @@
 mod agent;
 mod config;
 mod db;
+mod enrichment;
+mod github;
 mod markdown;
 mod project;
 mod readme;
@@ -38,6 +40,7 @@ mod skills;
 mod sources;
 mod tags_graph;
 mod ticket;
+mod vercel;
 
 #[cfg(feature = "swarm")]
 use crate::agent::AgentJob;
@@ -185,6 +188,27 @@ enum Commands {
         /// parallel store; the JSON map is still the source of truth for
         /// dashboard reads. Re-running `survey` re-imports the resulting
         /// JSON into this DB so the user can verify the migration.
+        #[arg(short = 'd', long, default_value = "mercator.db")]
+        db: PathBuf,
+    },
+    /// Enrich the projects already in the DB with per-project child data
+    /// (#8): GitHub issues (for the kanban) and Vercel deploy status. Reads
+    /// the surveyed project set from the DB and runs every enrichment provider
+    /// whose token is configured (GitHub token via --github-token / env /
+    /// config; Vercel token from `~/.config/mercator/config.toml`). Use this
+    /// to refresh issues/deploys without re-running a full `survey`.
+    Enrich {
+        /// GitHub personal access token (falls back to GITHUB_TOKEN env, then
+        /// the `[github]` token in config.toml)
+        #[arg(long, env = "GITHUB_TOKEN", hide_env_values = true)]
+        github_token: Option<String>,
+
+        /// Only ingest issues from repos you own/administer, excluding
+        /// push-only collaborations. Overrides `[github] owned_only` config.
+        #[arg(long)]
+        owned_only: bool,
+
+        /// SQLite database file
         #[arg(short = 'd', long, default_value = "mercator.db")]
         db: PathBuf,
     },
@@ -539,6 +563,11 @@ struct AppState {
     /// fails. Wrapped in a tokio Mutex because `rusqlite::Connection` is
     /// `!Sync`; lock holds are short (a single SELECT).
     db: Arc<Mutex<rusqlite::Connection>>,
+    /// Path to the SQLite file backing `db`. Enrichment providers open their
+    /// own short-lived write connection from this (WAL makes that safe) so a
+    /// network fetch never holds the shared `db` lock. Read endpoints still
+    /// go through `db`.
+    db_path: PathBuf,
     /// Paths the dashboard's refresh button re-scans. Empty = refresh is a
     /// no-op (button just reloads the page). Configured via `serve --refresh`.
     refresh_paths: Vec<PathBuf>,
@@ -903,12 +932,100 @@ async fn refresh_survey_api(State(state): State<AppState>) -> Json<serde_json::V
             return Json(serde_json::json!({ "ok": false, "error": e }));
         }
     }
+
+    // Enrich the refreshed set with per-project child data (#8). Providers
+    // open their own write connection at `state.db_path`; the shared `db`
+    // lock is not held across their network I/O.
+    let (github_scope, vercel_token, vercel_team) = {
+        let cfg = state.cfg.lock().await;
+        let github_scope = cfg.github.token().map(|t| enrichment::GithubScope {
+            token: t.to_string(),
+            owners: cfg.github.owners_lower(),
+            owned_only: cfg.github.owned_only,
+        });
+        (
+            github_scope,
+            cfg.vercel.token().map(str::to_string),
+            cfg.vercel.user().map(str::to_string),
+        )
+    };
+    let enrichers = enrichment::build_enrichments(
+        github_scope,
+        vercel_token.as_deref(),
+        vercel_team.as_deref(),
+    );
+    let enrichment_summaries = if enrichers.is_empty() {
+        Vec::new()
+    } else {
+        enrichment::run_all(&state.db_path, &all, &enrichers).await
+    };
+
     Json(serde_json::json!({
         "ok": true,
         "total": all.len(),
         "per_path": per_path,
         "per_source": remote_per_source,
+        "enrichment": enrichment_summaries,
     }))
+}
+
+/// `GET /api/deployments` — the latest Vercel deployment per project, keyed by
+/// `remoteUrl` so the dashboard can badge each project card with its deploy
+/// state. Populated by the Vercel enrichment provider on survey/refresh.
+async fn deployments_api(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let conn = state.db.lock().await;
+    match vercel::list_deployments(&conn) {
+        Ok(deployments) => Json(serde_json::json!({ "deployments": deployments })),
+        Err(e) => Json(serde_json::json!({ "error": e, "deployments": [] })),
+    }
+}
+
+#[derive(Deserialize)]
+struct ProjectIssuesQuery {
+    /// The project's git remote (any spelling). Canonicalized server-side to
+    /// `https://github.com/owner/repo` before lookup.
+    remote: String,
+}
+
+/// `GET /api/project/issues?remote=<url>` — the stored GitHub issues for a
+/// single project, open first, with open/closed counts. Backs the per-project
+/// drill-down in the dashboard preview pane. Non-GitHub remotes return empty.
+async fn project_issues_api(
+    axum::extract::Query(q): axum::extract::Query<ProjectIssuesQuery>,
+    State(state): State<AppState>,
+) -> Json<serde_json::Value> {
+    let canonical = match github::parse_owner_repo(&q.remote) {
+        Some((o, r)) => format!("https://github.com/{o}/{r}"),
+        None => {
+            return Json(serde_json::json!({
+                "issues": [], "lanes": github::LANES, "open": 0, "closed": 0
+            }))
+        }
+    };
+    let conn = state.db.lock().await;
+    match github::list_issue_views_for_remote(&conn, &canonical) {
+        Ok(views) => {
+            let open = views.iter().filter(|v| v.issue.state != "closed").count();
+            let closed = views.len() - open;
+            Json(serde_json::json!({
+                "remote": canonical, "lanes": github::LANES,
+                "issues": views, "open": open, "closed": closed
+            }))
+        }
+        Err(e) => Json(serde_json::json!({ "error": e, "issues": [], "lanes": github::LANES })),
+    }
+}
+
+/// `GET /api/issues` — every stored GitHub issue (PRs excluded) with its
+/// computed kanban lane, plus the ordered lane list. Read-only surface for the
+/// dashboard's kanban; populated by the GitHub-issues enrichment provider on
+/// survey/refresh.
+async fn issues_api(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let conn = state.db.lock().await;
+    match github::list_issue_views(&conn) {
+        Ok(issues) => Json(serde_json::json!({ "lanes": github::LANES, "issues": issues })),
+        Err(e) => Json(serde_json::json!({ "error": e, "lanes": github::LANES, "issues": [] })),
+    }
 }
 
 /// `GET /api/settings` — return the current config minus secrets.
@@ -1547,6 +1664,39 @@ async fn main() {
                     Err(e) => eprintln!("  ⚠  db upsert failed: {}", e),
                 }
 
+                // Enrich the surveyed projects with per-project child data
+                // (#8) — runs after the project set is persisted so providers
+                // see a consistent DB. Each provider opens its own write
+                // connection; ours (`conn`) is idle here. Gated on the
+                // relevant token being configured (see `build_enrichments`).
+                // Vercel has no CLI flag; its token comes from config.toml.
+                let survey_cfg = config::load().unwrap_or_default();
+                let github_scope = github_token.as_deref().map(|t| enrichment::GithubScope {
+                    token: t.to_string(),
+                    owners: survey_cfg.github.owners_lower(),
+                    owned_only: survey_cfg.github.owned_only,
+                });
+                let enrichers = enrichment::build_enrichments(
+                    github_scope,
+                    survey_cfg.vercel.token(),
+                    survey_cfg.vercel.user(),
+                );
+                if !enrichers.is_empty() {
+                    for s in enrichment::run_all(&db_path, &all_projects, &enrichers).await {
+                        eprintln!(
+                            "  enrich {}: {} projects, {} records{}",
+                            s.provider,
+                            s.projects_touched,
+                            s.records_upserted,
+                            if s.errors.is_empty() {
+                                String::new()
+                            } else {
+                                format!(", {} error(s): {}", s.errors.len(), s.errors.join("; "))
+                            }
+                        );
+                    }
+                }
+
                 match watch {
                     Some(minutes) => {
                         eprintln!("Next scan in {} min. Press Ctrl+C to stop.", minutes);
@@ -1554,6 +1704,67 @@ async fn main() {
                     }
                     None => break,
                 }
+            }
+        }
+        Commands::Enrich {
+            github_token,
+            owned_only,
+            db: db_path,
+        } => {
+            let conn = match db::open(&db_path) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("Error: open db {}: {}", db_path.display(), e);
+                    std::process::exit(1);
+                }
+            };
+            let projects = match db::load_all_projects(&conn) {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("Error: load projects: {}", e);
+                    std::process::exit(1);
+                }
+            };
+            // Token precedence: CLI flag / env, then config.toml.
+            let cfg = config::load().unwrap_or_default();
+            let github_scope = github_token
+                .as_deref()
+                .or_else(|| cfg.github.token())
+                .map(|t| enrichment::GithubScope {
+                    token: t.to_string(),
+                    owners: cfg.github.owners_lower(),
+                    // CLI flag OR config toggle.
+                    owned_only: owned_only || cfg.github.owned_only,
+                });
+            let enrichers =
+                enrichment::build_enrichments(github_scope, cfg.vercel.token(), cfg.vercel.user());
+            if enrichers.is_empty() {
+                eprintln!(
+                    "No enrichment providers configured. Set a GitHub token (--github-token / GITHUB_TOKEN / config.toml [github]) and/or a Vercel token (config.toml [vercel])."
+                );
+                return;
+            }
+            eprintln!(
+                "Enriching {} projects with: {}",
+                projects.len(),
+                enrichers
+                    .iter()
+                    .map(|e| e.name())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            for s in enrichment::run_all(&db_path, &projects, &enrichers).await {
+                eprintln!(
+                    "  {}: {} projects, {} records{}",
+                    s.provider,
+                    s.projects_touched,
+                    s.records_upserted,
+                    if s.errors.is_empty() {
+                        String::new()
+                    } else {
+                        format!(", {} error(s): {}", s.errors.len(), s.errors.join("; "))
+                    }
+                );
             }
         }
         Commands::List {
@@ -1890,6 +2101,7 @@ async fn main() {
                 task_handles: Arc::new(Mutex::new(std::collections::HashMap::new())),
                 map_file: map_file.clone(),
                 db: db_handle,
+                db_path: db_path.clone(),
                 refresh_paths: refresh,
                 cfg: Arc::new(Mutex::new(cfg)),
             };
@@ -1906,6 +2118,9 @@ async fn main() {
                 .route("/api/categorize", post(recategorize_api))
                 .route("/api/survey/refresh", post(refresh_survey_api))
                 .route("/api/skills", get(skills_api))
+                .route("/api/issues", get(issues_api))
+                .route("/api/project/issues", get(project_issues_api))
+                .route("/api/deployments", get(deployments_api))
                 .route("/api/settings", get(settings_api).post(settings_update_api))
                 .route("/api/project/purge", post(purge_project_api))
                 .route("/api/project/restore", post(restore_project_api))
