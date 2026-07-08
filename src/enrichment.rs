@@ -136,12 +136,14 @@ pub fn record_state(
 /// `sources::AnySource`. A new backend adds one variant here plus arms below.
 pub enum AnyEnrichment {
     GithubIssues(crate::github::GithubIssuesEnrichment),
+    Vercel(crate::vercel::VercelEnrichment),
 }
 
 impl AnyEnrichment {
     pub fn name(&self) -> &'static str {
         match self {
             AnyEnrichment::GithubIssues(e) => e.name(),
+            AnyEnrichment::Vercel(e) => e.name(),
         }
     }
 
@@ -152,16 +154,21 @@ impl AnyEnrichment {
     ) -> Result<EnrichmentSummary, EnrichmentError> {
         match self {
             AnyEnrichment::GithubIssues(e) => e.run(db_path, projects).await,
+            AnyEnrichment::Vercel(e) => e.run(db_path, projects).await,
         }
     }
 }
 
 /// Build the enrichment provider list from available credentials. A provider
 /// is only included when it has what it needs to run without immediately
-/// tripping rate limits (GitHub issue ingestion needs a token — the same one
-/// the GitHub source uses). Mirrors how the two dispatch sites build
-/// `Vec<AnySource>` from config.
-pub fn build_enrichments(github_token: Option<&str>) -> Vec<AnyEnrichment> {
+/// tripping rate limits: GitHub issue ingestion needs a token (the same one
+/// the GitHub source uses); Vercel needs an access token. Mirrors how the two
+/// dispatch sites build `Vec<AnySource>` from config.
+pub fn build_enrichments(
+    github_token: Option<&str>,
+    vercel_token: Option<&str>,
+    vercel_team: Option<&str>,
+) -> Vec<AnyEnrichment> {
     let mut v = Vec::new();
     if let Some(t) = github_token {
         v.push(AnyEnrichment::GithubIssues(
@@ -169,6 +176,12 @@ pub fn build_enrichments(github_token: Option<&str>) -> Vec<AnyEnrichment> {
                 token: Some(t.to_string()),
             },
         ));
+    }
+    if let Some(t) = vercel_token {
+        v.push(AnyEnrichment::Vercel(crate::vercel::VercelEnrichment {
+            token: t.to_string(),
+            team: vercel_team.map(str::to_string),
+        }));
     }
     v
 }

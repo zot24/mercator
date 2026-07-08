@@ -42,6 +42,11 @@ pub struct Config {
     pub github: ProviderConfig,
     #[serde(default)]
     pub gitlab: ProviderConfig,
+    /// Vercel deploy-status enrichment (#8). `token` is a Vercel access
+    /// token; the optional `user` field carries a `teamId` for team-scoped
+    /// accounts (personal accounts leave it unset).
+    #[serde(default)]
+    pub vercel: ProviderConfig,
 }
 
 /// What `GET /api/settings` returns — never includes the raw token.
@@ -53,6 +58,9 @@ pub struct RedactedConfig {
     pub github_token_set: bool,
     pub gitlab_user: Option<String>,
     pub gitlab_token_set: bool,
+    /// Vercel `teamId` (from the `user` field), never a secret.
+    pub vercel_team: Option<String>,
+    pub vercel_token_set: bool,
 }
 
 impl Config {
@@ -62,6 +70,8 @@ impl Config {
             github_token_set: self.github.token().is_some(),
             gitlab_user: self.gitlab.user().map(str::to_string),
             gitlab_token_set: self.gitlab.token().is_some(),
+            vercel_team: self.vercel.user().map(str::to_string),
+            vercel_token_set: self.vercel.token().is_some(),
         }
     }
 }
@@ -178,6 +188,7 @@ mod tests {
                 user: None,
                 token: None,
             },
+            ..Default::default()
         };
         let r = cfg.redacted();
         assert_eq!(r.github_user.as_deref(), Some("alice"));

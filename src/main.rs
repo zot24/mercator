@@ -40,6 +40,7 @@ mod skills;
 mod sources;
 mod tags_graph;
 mod ticket;
+mod vercel;
 
 #[cfg(feature = "swarm")]
 use crate::agent::AgentJob;
@@ -914,11 +915,19 @@ async fn refresh_survey_api(State(state): State<AppState>) -> Json<serde_json::V
     // Enrich the refreshed set with per-project child data (#8). Providers
     // open their own write connection at `state.db_path`; the shared `db`
     // lock is not held across their network I/O.
-    let github_token = {
+    let (github_token, vercel_token, vercel_team) = {
         let cfg = state.cfg.lock().await;
-        cfg.github.token().map(str::to_string)
+        (
+            cfg.github.token().map(str::to_string),
+            cfg.vercel.token().map(str::to_string),
+            cfg.vercel.user().map(str::to_string),
+        )
     };
-    let enrichers = enrichment::build_enrichments(github_token.as_deref());
+    let enrichers = enrichment::build_enrichments(
+        github_token.as_deref(),
+        vercel_token.as_deref(),
+        vercel_team.as_deref(),
+    );
     let enrichment_summaries = if enrichers.is_empty() {
         Vec::new()
     } else {
@@ -932,6 +941,17 @@ async fn refresh_survey_api(State(state): State<AppState>) -> Json<serde_json::V
         "per_source": remote_per_source,
         "enrichment": enrichment_summaries,
     }))
+}
+
+/// `GET /api/deployments` — the latest Vercel deployment per project, keyed by
+/// `remoteUrl` so the dashboard can badge each project card with its deploy
+/// state. Populated by the Vercel enrichment provider on survey/refresh.
+async fn deployments_api(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let conn = state.db.lock().await;
+    match vercel::list_deployments(&conn) {
+        Ok(deployments) => Json(serde_json::json!({ "deployments": deployments })),
+        Err(e) => Json(serde_json::json!({ "error": e, "deployments": [] })),
+    }
 }
 
 /// `GET /api/issues` — every stored GitHub issue (PRs excluded) with its
@@ -1587,7 +1607,13 @@ async fn main() {
                 // see a consistent DB. Each provider opens its own write
                 // connection; ours (`conn`) is idle here. Gated on the
                 // relevant token being configured (see `build_enrichments`).
-                let enrichers = enrichment::build_enrichments(github_token.as_deref());
+                // Vercel has no CLI flag; its token comes from config.toml.
+                let survey_cfg = config::load().unwrap_or_default();
+                let enrichers = enrichment::build_enrichments(
+                    github_token.as_deref(),
+                    survey_cfg.vercel.token(),
+                    survey_cfg.vercel.user(),
+                );
                 if !enrichers.is_empty() {
                     for s in enrichment::run_all(&db_path, &all_projects, &enrichers).await {
                         eprintln!(
@@ -1965,6 +1991,7 @@ async fn main() {
                 .route("/api/survey/refresh", post(refresh_survey_api))
                 .route("/api/skills", get(skills_api))
                 .route("/api/issues", get(issues_api))
+                .route("/api/deployments", get(deployments_api))
                 .route("/api/settings", get(settings_api).post(settings_update_api))
                 .route("/api/project/purge", post(purge_project_api))
                 .route("/api/project/restore", post(restore_project_api))
