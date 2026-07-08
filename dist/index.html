@@ -261,6 +261,7 @@
             <button id="view-list" onclick="setView('list')" class="px-3 py-1 text-[10px] mono font-medium bg-surface-variant text-on-surface">LIST</button>
             <button id="view-blocks" onclick="setView('blocks')" class="px-3 py-1 text-[10px] mono font-medium bg-surface-dim text-on-surface-variant hover:text-on-surface">BLOCKS</button>
             <button id="view-graph" onclick="setView('graph')" class="px-3 py-1 text-[10px] mono font-medium bg-surface-dim text-on-surface-variant hover:text-on-surface">GRAPH</button>
+            <button id="view-kanban" onclick="setView('kanban')" class="px-3 py-1 text-[10px] mono font-medium bg-surface-dim text-on-surface-variant hover:text-on-surface">KANBAN</button>
         </div>
     </div>
 
@@ -274,6 +275,9 @@
     <div id="graph-container" class="hidden" style="width:100%; height: calc(100vh - 8rem);">
         <svg id="graph-svg" width="100%" height="100%"></svg>
     </div>
+
+    <!-- Kanban View (GitHub issues across all repos, read-only) -->
+    <div id="kanban-container" class="hidden"></div>
 
     <!-- Graph Tooltip -->
     <div id="graph-tooltip" class="fixed hidden bg-surface-dim border border-outline-variant p-3 z-[999] max-w-xs pointer-events-none" style="backdrop-filter: blur(10px);">
@@ -1894,9 +1898,11 @@ token = "glpat-xxxxx" # optional</pre>
         setBtn('view-list', view === 'list');
         setBtn('view-blocks', view === 'blocks');
         setBtn('view-graph', view === 'graph');
+        setBtn('view-kanban', view === 'kanban');
         document.getElementById('map').classList.toggle('hidden', view !== 'list');
         document.getElementById('blocks-container').classList.toggle('hidden', view !== 'blocks');
         document.getElementById('graph-container').classList.toggle('hidden', view !== 'graph');
+        document.getElementById('kanban-container').classList.toggle('hidden', view !== 'kanban');
         if (view === 'blocks') {
             renderBlocks();
         } else if (view === 'graph' && !graphData) {
@@ -1905,7 +1911,83 @@ token = "glpat-xxxxx" # optional</pre>
             renderGraph(graphData);
         } else if (view === 'list') {
             renderProjects();
+        } else if (view === 'kanban') {
+            loadKanban();
         }
+    }
+
+    // ── Kanban (GitHub issues) ──────────────────────────────────────────
+    // Read-only board fed by /api/issues. Columns come from the server's
+    // lane list; each card links to the issue on GitHub. Issues are grouped
+    // by repo within a lane so the cross-project picture stays legible.
+    const LANE_LABELS = { todo: 'TODO', doing: 'IN PROGRESS', done: 'DONE' };
+    const LANE_ACCENT = {
+        todo: 'border-l-outline',
+        doing: 'border-l-tertiary',
+        done: 'border-l-primary',
+    };
+
+    function repoSlug(remoteUrl) {
+        // https://github.com/owner/repo -> owner/repo
+        const m = (remoteUrl || '').match(/github\.com[/:]([^/]+\/[^/]+?)(?:\.git)?$/i);
+        return m ? m[1] : (remoteUrl || 'unknown');
+    }
+
+    async function loadKanban() {
+        const container = document.getElementById('kanban-container');
+        container.innerHTML = '<div class="text-center py-16 mono text-sm text-on-surface-variant">LOADING_ISSUES…</div>';
+        let data;
+        try {
+            const res = await fetch('/api/issues');
+            data = await res.json();
+        } catch (e) {
+            container.innerHTML = `<div class="text-center py-16 mono text-sm text-error">FETCH_FAILED: ${escapeHtml(String(e))}</div>`;
+            return;
+        }
+        renderKanban(data);
+    }
+
+    function renderKanban(data) {
+        const container = document.getElementById('kanban-container');
+        const lanes = (data && data.lanes) || ['todo', 'doing', 'done'];
+        const issues = (data && data.issues) || [];
+
+        if (data && data.error) {
+            container.innerHTML = `<div class="text-center py-16 mono text-sm text-error">${escapeHtml(data.error)}</div>`;
+            return;
+        }
+        if (issues.length === 0) {
+            container.innerHTML = '<div class="text-center py-16 mono text-sm text-on-surface-variant">NO_ISSUES — run a survey with a GitHub token configured to populate the board.</div>';
+            return;
+        }
+
+        const byLane = {};
+        lanes.forEach(l => { byLane[l] = []; });
+        issues.forEach(i => { (byLane[i.lane] || (byLane[i.lane] = [])).push(i); });
+
+        const cols = lanes.map(lane => {
+            const items = byLane[lane] || [];
+            const cards = items.map(i => {
+                const labels = (i.labels || '').split(',').filter(Boolean)
+                    .map(l => `<span class="inline-block px-1 mono text-[9px] bg-surface-variant text-on-surface-variant rounded-sm">${escapeHtml(l.trim())}</span>`)
+                    .join(' ');
+                return `<a href="${escapeHtml(i.url)}" target="_blank" rel="noopener"
+                    class="block bg-surface-dim border-l-2 ${LANE_ACCENT[lane] || 'border-l-outline'} border-y border-r border-outline-variant p-2 hover:bg-surface-variant/50 transition-colors">
+                    <div class="mono text-[10px] text-on-surface-variant mb-0.5">${escapeHtml(repoSlug(i.remoteUrl))} #${i.number}</div>
+                    <div class="text-[12px] text-on-surface leading-snug">${escapeHtml(i.title)}</div>
+                    ${labels ? `<div class="mt-1 flex flex-wrap gap-1">${labels}</div>` : ''}
+                </a>`;
+            }).join('');
+            return `<div class="flex-1 min-w-[240px] flex flex-col gap-[3px]">
+                <div class="mono text-[10px] font-bold text-on-surface-variant px-1 py-1 flex items-center justify-between">
+                    <span>${LANE_LABELS[lane] || lane.toUpperCase()}</span>
+                    <span class="text-on-surface-variant/60">${items.length}</span>
+                </div>
+                ${cards || '<div class="mono text-[10px] text-on-surface-variant/50 px-1 py-4 text-center">—</div>'}
+            </div>`;
+        }).join('');
+
+        container.innerHTML = `<div class="flex gap-3 items-start overflow-x-auto pb-4">${cols}</div>`;
     }
 
     const blockBorder = {
