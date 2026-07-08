@@ -1,14 +1,24 @@
 # Mercator — Current State
 
-**Last updated:** 2026-06-19
+**Last updated:** 2026-07-08
 **Latest tag:** v0.1.x (master)
-**Test count:** 138 unit tests, all gated by CI
+**Test count:** 168 unit tests, all gated by CI
 
 This is the *living state* doc. [GOALS.md](../GOALS.md) is the long-term direction; [CLAUDE.md](../CLAUDE.md) is the operator's manual; this is "where are we right now." If you're picking up the project after time away, read this first.
 
 ---
 
 ## What just shipped
+
+The session ending 2026-07-08 landed the **enrichment plug-point** and the first slice of **#8** — cross-project visibility of GitHub issues and Vercel deploy status.
+
+- **New extension axis.** `enrichment.rs` adds an `Enrichment` trait + `AnyEnrichment` enum dispatch (mirrors `Source`/`AnySource`, ADR 0003) for *per-project child data* that can't ride `Source` (whose `fetch → Vec<Project>`). `EnrichmentError` finally carries the structured `Network`/`Api`/`Parse` split #8 called for (in the new module, not the legacy `SourceError`). **schema v6** adds `github_issues`, `github_remotes`, `vercel_deployments`, and `enrichment_state`, all keyed by `remote_url`.
+- **GitHub issues → kanban.** `github.rs` ingests issues (paginated reqwest, delete-then-insert) and the dashboard gains a read-only **KANBAN** view (`/api/issues`) with lanes derived from issue state + a `status:` label convention.
+- **Vercel deploy status → badges.** `vercel.rs` pulls the latest production deployment per project from `GET /v9/projects`, joins to surveyed projects by normalized git remote, and the dashboard badges each project row/card (`/api/deployments`) green/red/amber by state.
+- **Wiring.** Enrichment runs after project upsert at both dispatch sites (`survey`, `POST /api/survey/refresh`) and on-demand via the new `mercator enrich` command. Each provider opens its own short-lived write connection (WAL + `busy_timeout`) so a network fetch never holds the shared DB lock. Config gains a `[vercel]` block.
+- **Still open on #8:** Supabase/Turso providers, kanban write-back, and aligning `SourceError` to the `EnrichmentError` taxonomy.
+
+## Previously shipped
 
 The session ending 2026-06-19 made `mercator list` usable as a "what needs attention" view. Two parts:
 

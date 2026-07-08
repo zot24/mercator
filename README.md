@@ -94,7 +94,8 @@ the day it makes your existing project sprawl manageable.
 - Obsidian vault scan — pulls `Projects/` notes and the `@Projects.md` idea list, links them to matching repos by name
 - AI agent detection — identifies projects using Claude Code (`CLAUDE.md`, `.claude/`) or Codex (`AGENTS.md`, `.codex/`)
 - Deduplication — local Git repos merge with their GitHub/GitLab counterparts via remote URL or fallback name match
-- Pluggable source trait — adding new providers (Vercel/Supabase/Turso, in flight) is one struct + one `impl Source`; no fork of the survey loop
+- Pluggable source trait — adding new providers is one struct + one `impl Source`; no fork of the survey loop
+- Pluggable enrichment trait (#8) — per-project child data. **GitHub issues** power a read-only **kanban** view; **Vercel deploy status** shows as badges on every project. Adding a backend (Supabase/Turso next) is one struct + one `impl Enrichment` + one table
 
 **CLI access**
 - `mercator list [--type T] [--tag T] [--tech T]` — filter projects, tab-separated stdout for piping to `awk`/`cut`/`grep`
@@ -342,9 +343,9 @@ When `MERCATOR_TOKEN` is set, every `/api/*` request must include `Authorization
 
 The promises in *Why Mercator?* that don't ship today live as tracked issues. The honest delta:
 
-- **"Stops me from losing projects"** — local + GitHub + GitLab + Obsidian work; **Vercel / Supabase / Turso don't exist yet** ([#8](https://github.com/zot24/mercator/issues/8))
+- **"Stops me from losing projects"** — local + GitHub + GitLab + Obsidian work; **GitHub issues (kanban) and Vercel deploy status now land via the enrichment plug-point** ([#8](https://github.com/zot24/mercator/issues/8)); Supabase / Turso are next on the same seam
 - **"Cuts the context-switch tax"** — file-tree explorer ships with smart auto-open: dirty repos open the most-recently-modified uncommitted file; clean repos open the freshest file under `src/`/`app/`/`lib/`; README is the fallback. Header banner shows branch, last commit, and days-since-modified.
-- **"Catches silent decay"** — dirty repos and stale (≥21 days idle) surface today, plus a `ROTTING` filter for the rare project that's both. Deploy / quota decay is gated on [#8](https://github.com/zot24/mercator/issues/8)
+- **"Catches silent decay"** — dirty repos and stale (≥21 days idle) surface today, plus a `ROTTING` filter for the rare project that's both. Failed/ERROR Vercel deploys now surface as red badges ([#8](https://github.com/zot24/mercator/issues/8)); Supabase/Turso quota decay is still pending
 - **"Tells me where to point AI"** — single-project agent launch works (with `--features swarm`); **cross-project landscape questioning** is [#20](https://github.com/zot24/mercator/issues/20)
 - **"Doesn't trap my data"** — `mercator export` writes one markdown file per project with frontmatter + body; `--obsidian-vault` mode targets the Obsidian wiki layer.
 

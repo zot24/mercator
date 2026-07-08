@@ -191,6 +191,22 @@ enum Commands {
         #[arg(short = 'd', long, default_value = "mercator.db")]
         db: PathBuf,
     },
+    /// Enrich the projects already in the DB with per-project child data
+    /// (#8): GitHub issues (for the kanban) and Vercel deploy status. Reads
+    /// the surveyed project set from the DB and runs every enrichment provider
+    /// whose token is configured (GitHub token via --github-token / env /
+    /// config; Vercel token from `~/.config/mercator/config.toml`). Use this
+    /// to refresh issues/deploys without re-running a full `survey`.
+    Enrich {
+        /// GitHub personal access token (falls back to GITHUB_TOKEN env, then
+        /// the `[github]` token in config.toml)
+        #[arg(long, env = "GITHUB_TOKEN", hide_env_values = true)]
+        github_token: Option<String>,
+
+        /// SQLite database file
+        #[arg(short = 'd', long, default_value = "mercator.db")]
+        db: PathBuf,
+    },
     /// List projects from the DB, optionally filtered by type / tag / tech.
     /// Default output is one project per line, tab-separated columns (type,
     /// path, name, tags-comma-joined, tech-comma-joined) so you can pipe to
@@ -1637,6 +1653,61 @@ async fn main() {
                     }
                     None => break,
                 }
+            }
+        }
+        Commands::Enrich {
+            github_token,
+            db: db_path,
+        } => {
+            let conn = match db::open(&db_path) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("Error: open db {}: {}", db_path.display(), e);
+                    std::process::exit(1);
+                }
+            };
+            let projects = match db::load_all_projects(&conn) {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("Error: load projects: {}", e);
+                    std::process::exit(1);
+                }
+            };
+            // Token precedence: CLI flag / env, then config.toml.
+            let cfg = config::load().unwrap_or_default();
+            let gh = github_token
+                .as_deref()
+                .or_else(|| cfg.github.token())
+                .map(str::to_string);
+            let enrichers =
+                enrichment::build_enrichments(gh.as_deref(), cfg.vercel.token(), cfg.vercel.user());
+            if enrichers.is_empty() {
+                eprintln!(
+                    "No enrichment providers configured. Set a GitHub token (--github-token / GITHUB_TOKEN / config.toml [github]) and/or a Vercel token (config.toml [vercel])."
+                );
+                return;
+            }
+            eprintln!(
+                "Enriching {} projects with: {}",
+                projects.len(),
+                enrichers
+                    .iter()
+                    .map(|e| e.name())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            for s in enrichment::run_all(&db_path, &projects, &enrichers).await {
+                eprintln!(
+                    "  {}: {} projects, {} records{}",
+                    s.provider,
+                    s.projects_touched,
+                    s.records_upserted,
+                    if s.errors.is_empty() {
+                        String::new()
+                    } else {
+                        format!(", {} error(s): {}", s.errors.len(), s.errors.join("; "))
+                    }
+                );
             }
         }
         Commands::List {

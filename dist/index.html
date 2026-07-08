@@ -629,7 +629,11 @@ token = "ghp_xxxxx"   # optional — public repos work without it (60/hr cap)
 
 [gitlab]
 user = "zot24"
-token = "glpat-xxxxx" # optional</pre>
+token = "glpat-xxxxx" # optional
+
+[vercel]
+token = "vercel_xxxxx" # deploy-status badges + kanban enrichment (#8)
+user = "team_xxxxx"    # optional teamId for team-scoped accounts
             <p class="text-[11px] leading-relaxed text-on-surface-variant mt-3">
                 You can also edit it from the <button onclick="closeDocsView(); openSettings();" class="text-primary hover:underline">settings panel</button> — tokens never appear in the response from <code>GET /api/settings</code>, only a <code>*_token_set</code> boolean for the "you have a token configured" hint.
             </p>
