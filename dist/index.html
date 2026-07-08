@@ -1718,6 +1718,37 @@ token = "glpat-xxxxx" # optional</pre>
         return sortProjects(filtered, document.getElementById('sort').value);
     }
 
+    // ── Vercel deploy badges ────────────────────────────────────────────
+    // /api/deployments gives the latest deploy per project, keyed by remoteUrl.
+    // We badge each project row/block whose remoteUrl matches.
+    let deployByRemote = {};
+    const DEPLOY_COLOR = {
+        READY: 'border-primary/40 text-primary',
+        ERROR: 'border-error/40 text-error',
+        BUILDING: 'border-claude-orange/40 text-claude-orange',
+        QUEUED: 'border-claude-orange/40 text-claude-orange',
+        INITIALIZING: 'border-claude-orange/40 text-claude-orange',
+        CANCELED: 'border-outline text-on-surface-variant',
+    };
+    function deployTagHtml(p) {
+        const d = p && p.remoteUrl ? deployByRemote[p.remoteUrl] : null;
+        if (!d) return '';
+        const cls = DEPLOY_COLOR[d.state] || 'border-outline text-on-surface-variant';
+        const href = d.inspectorUrl || d.url || '#';
+        const title = `Vercel deploy: ${d.state}${d.target ? ' (' + d.target + ')' : ''}`;
+        return `<a href="${escapeHtml(href)}" target="_blank" rel="noopener" onclick="event.stopPropagation()" class="px-1 border ${cls} cursor-pointer" title="${escapeHtml(title)}">▲ ${escapeHtml(d.state)}</a>`;
+    }
+    async function loadDeployments() {
+        try {
+            const res = await fetch('/api/deployments');
+            const data = await res.json();
+            deployByRemote = {};
+            (data.deployments || []).forEach(d => { if (d.remoteUrl) deployByRemote[d.remoteUrl] = d; });
+            if (currentView === 'list') renderProjects();
+            else if (currentView === 'blocks') renderBlocks();
+        } catch (e) { /* deploy badges are best-effort; ignore */ }
+    }
+
     function renderProjects() {
         if (currentView === 'blocks') return renderBlocks();
         let filtered = getFilteredProjects();
@@ -1825,6 +1856,7 @@ token = "glpat-xxxxx" # optional</pre>
                                 ${(branchTag || p.lastCommit) && (techTags || agentTag || catTags) ? '<span>·</span>' : ''}
                                 <div class="flex gap-1 flex-wrap">
                                     <span class="px-1 border border-outline-variant ${tc}">${p.project_type}</span>
+                                    ${deployTagHtml(p)}
                                     ${agentTag}
                                     ${techTags}
                                     ${catTags}
@@ -2293,6 +2325,7 @@ token = "glpat-xxxxx" # optional</pre>
             renderCategoryList();
             updateCounts();
             renderProjects();
+            loadDeployments();
         })
         .catch(() => {
             document.getElementById('map').innerHTML = '<div class="text-center py-16 mono text-sm text-on-surface-variant">ERROR: RUN "mercator survey" FIRST</div>';
