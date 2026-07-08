@@ -63,6 +63,9 @@ cargo run -- survey ~/Desktop/code --watch 5
 # (GitHub via --github-token/GITHUB_TOKEN/config; Vercel via config.toml).
 # Survey/refresh also run enrichment automatically.
 cargo run -- enrich --github-token ghp_xxx
+# Scope issues to repos you own/administer (drop push-only collaborations).
+# Persist as `[github] owned_only = true` (or `owners = [...]`) in config.toml.
+cargo run -- enrich --github-token ghp_xxx --owned-only
 
 # Dashboard (reads from mercator.db; falls back to map.json on DB error)
 # Views: LIST / BLOCKS / GRAPH / KANBAN (GitHub issues). Vercel deploy

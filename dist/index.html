@@ -626,6 +626,8 @@ mercator export --obsidian-vault ~/Desktop/brain --obsidian-folder Mercator</pre
             <pre class="mono text-[10px] text-on-surface bg-surface-dim border border-outline-variant rounded p-3 overflow-x-auto">[github]
 user = "zot24"
 token = "ghp_xxxxx"   # optional — public repos work without it (60/hr cap)
+owned_only = true     # only ingest issues from repos you own/admin (drop push-only collabs)
+owners = ["zot24", "motty"]  # optional: restrict issue ingestion to these owners
 
 [gitlab]
 user = "zot24"

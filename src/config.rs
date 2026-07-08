@@ -25,6 +25,16 @@ pub struct ProviderConfig {
     pub user: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token: Option<String>,
+    /// GitHub-only: restrict issue enrichment to these repo owners
+    /// (case-insensitive). Empty = no owner filter. Use it to pin the board
+    /// to your own accounts/orgs, e.g. `owners = ["zot24", "motty"]`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub owners: Vec<String>,
+    /// GitHub-only: only enrich repos you own/administer (admin permission),
+    /// excluding push-only collaborations. Default false (any repo you can
+    /// push to).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub owned_only: bool,
 }
 
 impl ProviderConfig {
@@ -33,6 +43,14 @@ impl ProviderConfig {
     }
     pub fn token(&self) -> Option<&str> {
         self.token.as_deref().filter(|s| !s.is_empty())
+    }
+    /// Owner allowlist, lowercased for case-insensitive matching.
+    pub fn owners_lower(&self) -> Vec<String> {
+        self.owners
+            .iter()
+            .map(|s| s.trim().to_lowercase())
+            .filter(|s| !s.is_empty())
+            .collect()
     }
 }
 
@@ -167,6 +185,7 @@ mod tests {
             github: ProviderConfig {
                 user: Some("".into()),
                 token: Some("".into()),
+                ..Default::default()
             },
             ..Default::default()
         };
@@ -183,10 +202,12 @@ mod tests {
             github: ProviderConfig {
                 user: Some("alice".into()),
                 token: Some("ghp_secret".into()),
+                ..Default::default()
             },
             gitlab: ProviderConfig {
                 user: None,
                 token: None,
+                ..Default::default()
             },
             ..Default::default()
         };
@@ -214,6 +235,7 @@ mod tests {
             github: ProviderConfig {
                 user: Some("alice".into()),
                 token: Some("secret".into()),
+                ..Default::default()
             },
             ..Default::default()
         };

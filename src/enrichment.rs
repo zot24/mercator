@@ -159,21 +159,33 @@ impl AnyEnrichment {
     }
 }
 
+/// GitHub issue-ingestion scope: token plus how tightly to bound "my repos".
+#[derive(Default)]
+pub struct GithubScope {
+    pub token: String,
+    /// Owner allowlist (case-insensitive). Empty = any owner.
+    pub owners: Vec<String>,
+    /// Only enrich repos you administer (excludes push-only collaborations).
+    pub owned_only: bool,
+}
+
 /// Build the enrichment provider list from available credentials. A provider
 /// is only included when it has what it needs to run without immediately
 /// tripping rate limits: GitHub issue ingestion needs a token (the same one
 /// the GitHub source uses); Vercel needs an access token. Mirrors how the two
 /// dispatch sites build `Vec<AnySource>` from config.
 pub fn build_enrichments(
-    github_token: Option<&str>,
+    github: Option<GithubScope>,
     vercel_token: Option<&str>,
     vercel_team: Option<&str>,
 ) -> Vec<AnyEnrichment> {
     let mut v = Vec::new();
-    if let Some(t) = github_token {
+    if let Some(g) = github {
         v.push(AnyEnrichment::GithubIssues(
             crate::github::GithubIssuesEnrichment {
-                token: Some(t.to_string()),
+                token: Some(g.token),
+                owners: g.owners,
+                owned_only: g.owned_only,
             },
         ));
     }

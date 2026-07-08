@@ -216,6 +216,12 @@ impl RepoMeta {
             .map(|p| p.push || p.admin)
             .unwrap_or(false)
     }
+
+    /// True when the user administers the repo — the stricter "I own this"
+    /// signal that excludes push-only collaborations.
+    fn is_admin(&self) -> bool {
+        self.permissions.as_ref().map(|p| p.admin).unwrap_or(false)
+    }
 }
 
 async fn fetch_repo_meta(
@@ -421,9 +427,28 @@ fn issue_views_query<P: rusqlite::Params>(
 }
 
 /// The GitHub-issues enrichment provider. Applies to any surveyed project
-/// whose remote is on `github.com`.
+/// whose remote is on `github.com`; ownership scoping happens in `run`.
 pub struct GithubIssuesEnrichment {
     pub token: Option<String>,
+    /// Owner allowlist (lowercased). Empty = allow any owner.
+    pub owners: Vec<String>,
+    /// Require admin (owned) rather than push access.
+    pub owned_only: bool,
+}
+
+impl GithubIssuesEnrichment {
+    /// Whether a repo passes the ownership scope: owner allowlist (if any) +
+    /// the permission bar (`owned_only` → admin, else push).
+    fn in_scope(&self, owner: &str, meta: &RepoMeta) -> bool {
+        let owner_ok =
+            self.owners.is_empty() || self.owners.iter().any(|o| o == &owner.to_lowercase());
+        let perm_ok = if self.owned_only {
+            meta.is_admin()
+        } else {
+            meta.can_push()
+        };
+        owner_ok && perm_ok
+    }
 }
 
 impl Enrichment for GithubIssuesEnrichment {
@@ -474,12 +499,12 @@ impl Enrichment for GithubIssuesEnrichment {
         let mut owned: Vec<(&String, &String)> = Vec::new();
         for (o, r, res) in metas {
             match res {
-                Ok(m) if m.can_push() => {
+                Ok(m) if self.in_scope(o, &m) => {
                     if m.has_issues {
                         owned.push((o, r));
                     }
                 }
-                Ok(_) => {} // not mine (read-only) — skip silently
+                Ok(_) => {} // out of scope (read-only, or not owned) — skip
                 Err(EnrichmentError::Api { status: 404, .. }) => {} // gone / no access
                 Err(e) => summary.errors.push(format!("{o}/{r} meta: {e}")),
             }
@@ -603,6 +628,41 @@ mod tests {
         // has_issues defaults to true when GitHub omits it.
         let bare: RepoMeta = serde_json::from_str(r#"{"permissions":{"push":true}}"#).unwrap();
         assert!(bare.has_issues && bare.can_push());
+    }
+
+    #[test]
+    fn in_scope_applies_owner_allowlist_and_permission_bar() {
+        let admin: RepoMeta =
+            serde_json::from_str(r#"{"permissions":{"admin":true,"push":true}}"#).unwrap();
+        let collab: RepoMeta =
+            serde_json::from_str(r#"{"permissions":{"admin":false,"push":true}}"#).unwrap();
+
+        // Default: any pushable repo, no owner filter.
+        let any = GithubIssuesEnrichment {
+            token: None,
+            owners: vec![],
+            owned_only: false,
+        };
+        assert!(any.in_scope("destin18", &collab));
+        assert!(any.in_scope("zot24", &admin));
+
+        // owned_only drops the push-only collaboration but keeps admin repos.
+        let owned = GithubIssuesEnrichment {
+            token: None,
+            owners: vec![],
+            owned_only: true,
+        };
+        assert!(!owned.in_scope("destin18", &collab));
+        assert!(owned.in_scope("zot24", &admin));
+
+        // Owner allowlist (case-insensitive) excludes owners not listed.
+        let listed = GithubIssuesEnrichment {
+            token: None,
+            owners: vec!["zot24".into(), "motty".into()],
+            owned_only: false,
+        };
+        assert!(listed.in_scope("ZOT24", &admin));
+        assert!(!listed.in_scope("destin18", &collab));
     }
 
     #[test]

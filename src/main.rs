@@ -203,6 +203,11 @@ enum Commands {
         #[arg(long, env = "GITHUB_TOKEN", hide_env_values = true)]
         github_token: Option<String>,
 
+        /// Only ingest issues from repos you own/administer, excluding
+        /// push-only collaborations. Overrides `[github] owned_only` config.
+        #[arg(long)]
+        owned_only: bool,
+
         /// SQLite database file
         #[arg(short = 'd', long, default_value = "mercator.db")]
         db: PathBuf,
@@ -931,16 +936,21 @@ async fn refresh_survey_api(State(state): State<AppState>) -> Json<serde_json::V
     // Enrich the refreshed set with per-project child data (#8). Providers
     // open their own write connection at `state.db_path`; the shared `db`
     // lock is not held across their network I/O.
-    let (github_token, vercel_token, vercel_team) = {
+    let (github_scope, vercel_token, vercel_team) = {
         let cfg = state.cfg.lock().await;
+        let github_scope = cfg.github.token().map(|t| enrichment::GithubScope {
+            token: t.to_string(),
+            owners: cfg.github.owners_lower(),
+            owned_only: cfg.github.owned_only,
+        });
         (
-            cfg.github.token().map(str::to_string),
+            github_scope,
             cfg.vercel.token().map(str::to_string),
             cfg.vercel.user().map(str::to_string),
         )
     };
     let enrichers = enrichment::build_enrichments(
-        github_token.as_deref(),
+        github_scope,
         vercel_token.as_deref(),
         vercel_team.as_deref(),
     );
@@ -1661,8 +1671,13 @@ async fn main() {
                 // relevant token being configured (see `build_enrichments`).
                 // Vercel has no CLI flag; its token comes from config.toml.
                 let survey_cfg = config::load().unwrap_or_default();
+                let github_scope = github_token.as_deref().map(|t| enrichment::GithubScope {
+                    token: t.to_string(),
+                    owners: survey_cfg.github.owners_lower(),
+                    owned_only: survey_cfg.github.owned_only,
+                });
                 let enrichers = enrichment::build_enrichments(
-                    github_token.as_deref(),
+                    github_scope,
                     survey_cfg.vercel.token(),
                     survey_cfg.vercel.user(),
                 );
@@ -1693,6 +1708,7 @@ async fn main() {
         }
         Commands::Enrich {
             github_token,
+            owned_only,
             db: db_path,
         } => {
             let conn = match db::open(&db_path) {
@@ -1711,12 +1727,17 @@ async fn main() {
             };
             // Token precedence: CLI flag / env, then config.toml.
             let cfg = config::load().unwrap_or_default();
-            let gh = github_token
+            let github_scope = github_token
                 .as_deref()
                 .or_else(|| cfg.github.token())
-                .map(str::to_string);
+                .map(|t| enrichment::GithubScope {
+                    token: t.to_string(),
+                    owners: cfg.github.owners_lower(),
+                    // CLI flag OR config toggle.
+                    owned_only: owned_only || cfg.github.owned_only,
+                });
             let enrichers =
-                enrichment::build_enrichments(gh.as_deref(), cfg.vercel.token(), cfg.vercel.user());
+                enrichment::build_enrichments(github_scope, cfg.vercel.token(), cfg.vercel.user());
             if enrichers.is_empty() {
                 eprintln!(
                     "No enrichment providers configured. Set a GitHub token (--github-token / GITHUB_TOKEN / config.toml [github]) and/or a Vercel token (config.toml [vercel])."
