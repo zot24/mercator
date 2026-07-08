@@ -258,7 +258,13 @@ pub fn persist_issues(
                 "INSERT INTO github_issues
                  (remote_url, issue_number, title, state, author_login, assignees_csv,
                   labels_csv, is_pr, created_at, updated_at, closed_at, url)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)
+                 ON CONFLICT(remote_url, issue_number) DO UPDATE SET
+                   title=excluded.title, state=excluded.state,
+                   author_login=excluded.author_login, assignees_csv=excluded.assignees_csv,
+                   labels_csv=excluded.labels_csv, is_pr=excluded.is_pr,
+                   created_at=excluded.created_at, updated_at=excluded.updated_at,
+                   closed_at=excluded.closed_at, url=excluded.url",
             )
             .map_err(|e| format!("prepare insert: {e}"))?;
         for i in issues {
@@ -331,13 +337,16 @@ impl Enrichment for GithubIssuesEnrichment {
 
         // Dedup targets by remote so a local clone + its fetched GitHub twin
         // don't get surveyed twice.
+        // Dedup by owner/repo — a local clone and its GitHub twin resolve to
+        // the same repo. Everything downstream keys on the canonical
+        // `github.com/owner/repo`, so the two remote spellings collapse.
         let mut seen = std::collections::HashSet::new();
-        let targets: Vec<(String, String, String)> = projects
+        let targets: Vec<(String, String)> = projects
             .iter()
             .filter(|p| self.applies_to(p))
             .filter_map(|p| p.remote_url.as_deref())
-            .filter_map(|ru| parse_owner_repo(ru).map(|(o, r)| (ru.to_string(), o, r)))
-            .filter(|(_, o, r)| seen.insert(format!("{o}/{r}")))
+            .filter_map(parse_owner_repo)
+            .filter(|(o, r)| seen.insert(format!("{o}/{r}")))
             .collect();
         summary.projects_touched = targets.len();
         if targets.is_empty() {
@@ -347,15 +356,19 @@ impl Enrichment for GithubIssuesEnrichment {
         let token = self.token.as_deref();
         let client = reqwest::Client::new();
         let client = &client;
-        let fetches = targets.iter().map(|(ru, o, r)| async move {
-            (ru, o, r, fetch_repo_issues(client, o, r, token).await)
-        });
+        let fetches = targets
+            .iter()
+            .map(|(o, r)| async move { (o, r, fetch_repo_issues(client, o, r, token).await) });
         let results = futures::future::join_all(fetches).await;
 
         let conn = crate::db::open(db_path).map_err(EnrichmentError::Config)?;
-        for (ru, o, r, res) in results {
+        for (o, r, res) in results {
+            // Persist under the canonical remote — the same URL
+            // `fetch_repo_issues` stamps on each Issue, so DELETE-then-INSERT
+            // agree across runs regardless of the project's remote spelling.
+            let remote = format!("https://github.com/{o}/{r}");
             match res {
-                Ok(issues) => match persist_issues(&conn, ru, o, r, &issues) {
+                Ok(issues) => match persist_issues(&conn, &remote, o, r, &issues) {
                     Ok(n) => summary.records_upserted += n,
                     Err(e) => summary.errors.push(format!("{o}/{r}: {e}")),
                 },
@@ -433,6 +446,38 @@ mod tests {
         assert_eq!(issues[0].assignees_csv.as_deref(), Some("zot24,motty"));
         assert!(!issues[0].is_pr);
         assert!(issues[1].is_pr, "the pull_request key marks a PR");
+    }
+
+    #[test]
+    fn persist_tolerates_duplicate_issue_numbers_in_a_batch() {
+        // GitHub pagination can repeat an item across page boundaries. A batch
+        // with a duplicate issue_number must not abort the whole repo's tx —
+        // ON CONFLICT updates to the last-seen row instead.
+        let dir = tempfile::tempdir().unwrap();
+        let conn = crate::db::open(&dir.path().join("db.sqlite")).unwrap();
+        let ru = "https://github.com/zot24/mercator";
+        let mut a = issues_from_json(
+            ru,
+            r#"[{"number":8,"title":"first","state":"open","user":{"login":"z"},
+                 "created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z",
+                 "closed_at":null,"html_url":"https://github.com/zot24/mercator/issues/8"}]"#,
+        )
+        .unwrap();
+        let dup = issues_from_json(
+            ru,
+            r#"[{"number":8,"title":"second","state":"closed","user":{"login":"z"},
+                 "created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-02T00:00:00Z",
+                 "closed_at":"2026-01-02T00:00:00Z","html_url":"https://github.com/zot24/mercator/issues/8"}]"#,
+        )
+        .unwrap();
+        a.extend(dup);
+        // Two rows, same (remote_url, issue_number) — must not error.
+        let n = persist_issues(&conn, ru, "zot24", "mercator", &a).unwrap();
+        assert_eq!(n, 2);
+        let views = list_issue_views(&conn).unwrap();
+        assert_eq!(views.len(), 1, "one row survives the conflict");
+        assert_eq!(views[0].issue.title, "second", "last write wins");
+        assert_eq!(views[0].lane, "done");
     }
 
     #[test]
