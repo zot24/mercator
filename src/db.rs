@@ -376,6 +376,31 @@ pub fn import_from_json(
     Ok(stats)
 }
 
+/// First-run hydration for `mercator serve`: run [`import_from_json`] only
+/// when the `projects` table is empty, and otherwise leave the DB alone.
+///
+/// The DB is the source of truth once it has rows. Re-importing the
+/// legacy `mercator_map.json` on every start re-stamped `last_seen` on
+/// every row and reverted any DB-side change the snapshot didn't carry
+/// (`POST /api/survey/refresh` and `POST /api/categorize` write the DB
+/// and never the JSON). Guarding on an empty table keeps README's "runs
+/// once on first start" literally true without dropping the JSON-only
+/// upgrade path. `survey` keeps calling [`import_from_json`] directly
+/// (#90).
+///
+/// Returns `Ok(None)` when the import was skipped because the DB already
+/// holds projects, `Ok(Some(stats))` when it ran.
+pub fn import_from_json_if_empty(
+    conn: &mut Connection,
+    map_json_path: &Path,
+    purged_json_path: Option<&Path>,
+) -> Result<Option<ImportStats>, String> {
+    if count_projects(conn)? > 0 {
+        return Ok(None);
+    }
+    import_from_json(conn, map_json_path, purged_json_path).map(Some)
+}
+
 /// Bulk upsert a slice of projects in a single transaction. Returns
 /// counts of newly-inserted vs updated rows. Used by stage-2c handlers
 /// that already hold a `Vec<Project>` (refresh re-survey, recategorize)
@@ -1174,6 +1199,64 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM tags", [], |r| r.get(0))
             .unwrap();
         assert_eq!(tag_count, 2);
+    }
+
+    #[test]
+    fn guarded_import_hydrates_an_empty_db() {
+        let dir = tempfile::tempdir().unwrap();
+        let map_path = dir.path().join("map.json");
+        save_map(
+            &[
+                sample_project("alpha", "/tmp/alpha", ProjectType::Git),
+                sample_project("beta", "/tmp/beta", ProjectType::GitHub),
+            ],
+            &map_path,
+        )
+        .unwrap();
+
+        let mut conn = open(&dir.path().join("db.sqlite")).unwrap();
+        let stats = import_from_json_if_empty(&mut conn, &map_path, None)
+            .unwrap()
+            .expect("empty DB must hydrate from the map");
+        assert_eq!(stats.projects_inserted, 2);
+        assert_eq!(count_projects(&conn).unwrap(), 2);
+    }
+
+    #[test]
+    fn guarded_import_skips_a_populated_db_and_keeps_db_side_edits() {
+        let dir = tempfile::tempdir().unwrap();
+        let map_path = dir.path().join("map.json");
+        save_map(
+            &[sample_project("alpha", "/tmp/alpha", ProjectType::Git)],
+            &map_path,
+        )
+        .unwrap();
+
+        // First start: hydrate. Then a DB-side edit the JSON doesn't carry
+        // (what /api/survey/refresh or /api/categorize would do).
+        let mut conn = open(&dir.path().join("db.sqlite")).unwrap();
+        import_from_json_if_empty(&mut conn, &map_path, None)
+            .unwrap()
+            .expect("first start hydrates");
+        conn.execute(
+            "UPDATE projects SET description = 'EDITED-IN-DB', \
+             last_seen = '2000-01-01T00:00:00.000Z' WHERE path = '/tmp/alpha'",
+            [],
+        )
+        .unwrap();
+
+        // Second start: the guard must skip, so the edit and the stamp survive.
+        let skipped = import_from_json_if_empty(&mut conn, &map_path, None).unwrap();
+        assert!(skipped.is_none(), "populated DB must not be re-imported");
+        let (desc, seen): (String, String) = conn
+            .query_row(
+                "SELECT description, last_seen FROM projects WHERE path = '/tmp/alpha'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(desc, "EDITED-IN-DB");
+        assert_eq!(seen, "2000-01-01T00:00:00.000Z");
     }
 
     #[test]

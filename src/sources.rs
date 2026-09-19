@@ -645,13 +645,7 @@ pub fn deduplicate_projects(projects: Vec<Project>) -> Vec<Project> {
             .remote_url
             .as_ref()
             .map(|url| normalize_remote_url(url))
-            .and_then(|key| {
-                if remote_by_url.contains_key(&key) {
-                    Some(key)
-                } else {
-                    None
-                }
-            })
+            .filter(|key| remote_by_url.contains_key(key))
             // Fallback: match by name for Folder types without remote URLs
             .or_else(|| remote_by_name.get(&local.name.to_lowercase()).cloned());
 
