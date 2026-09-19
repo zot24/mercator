@@ -43,7 +43,8 @@ same screen as everything else, so they're hard to ignore.
 `ROTTING` filter, and the active set answer "what needs me today" from the
 map itself. Mercator does not run the work: dispatching agents, proving
 results, and recording decisions happen in a separate ops loop outside this
-repo. Mercator is the map that loop reads.
+repo. The join between the two is the files Mercator exports; nothing reads
+them yet.
 
 **Doesn't trap my data.** Everything exports to plain markdown. If Mercator
 dies tomorrow, I still walk away with a folder of structured notes on every
@@ -359,7 +360,7 @@ mercator serve --refresh ~/code         # Refresh button re-scans this path in-p
 | `-d, --db <file>` | SQLite DB file (default: `mercator.db`). Source of truth for every read and write. |
 | `--refresh <path>` | Local path the dashboard's refresh button re-scans. Repeat for multiple roots: `serve --refresh ~/code --refresh ~/oss`. Without this, the refresh button just reloads the page. |
 
-Without `--refresh`, the dashboard sees new projects only after a fresh `mercator survey ...`. With `--refresh`, the in-dashboard refresh button re-scans and upserts directly into the live DB — faster for ad-hoc local changes. Remote sources (GitHub/GitLab/Obsidian) are not re-fetched on refresh; use `mercator survey ...` for those.
+Without `--refresh`, the dashboard sees new projects only after a fresh `mercator survey ...`. With `--refresh`, the in-dashboard refresh button re-scans those paths and upserts directly into the live DB — faster for ad-hoc local changes. In the same request it re-fetches GitHub / GitLab when `config.toml` names a user, and then runs enrichment (issues, Vercel deploys) when the tokens are configured. The Obsidian vault is not re-scanned on refresh; use `mercator survey --obsidian ...` for that.
 
 #### Optional: token config
 
