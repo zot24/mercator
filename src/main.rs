@@ -1131,8 +1131,25 @@ async fn recategorize_api(State(state): State<AppState>) -> Json<serde_json::Val
 
 // (skills inventory moved to src/skills.rs)
 
+/// `GET /api/skills` — the grouped skill inventory. The per-project scan
+/// walks the projects in the DB (the source of truth), never the legacy
+/// `mercator_map.json` snapshot (#90). The DB lock is released before the
+/// filesystem walk so a slow scan doesn't block the other handlers.
 async fn skills_api(State(state): State<AppState>) -> Json<Vec<crate::skills::SkillGroup>> {
-    Json(crate::skills::compute_skill_groups(&state.map_file))
+    let projects = {
+        let conn = state.db.lock().await;
+        match db::load_all_projects(&conn) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!(
+                    "Warning: skills: db read failed ({}); scanning global only",
+                    e
+                );
+                Vec::new()
+            }
+        }
+    };
+    Json(crate::skills::compute_skill_groups(&projects))
 }
 
 /// Tab-separated single-line project row for `mercator list` / `search`.
@@ -2058,16 +2075,28 @@ async fn main() {
             // dashboard, which is worse than a clear startup failure.
             let mut conn =
                 db::open(&db_path).expect("open db (use --db to point at a writable file)");
+            // The import runs only when the `projects` table is empty
+            // (first start on a JSON-only install). A populated DB is the
+            // source of truth and must not be overwritten by the snapshot
+            // on every start (#90).
             let purged_sidecar = db::purged_sidecar_for_map(&map_file);
-            match db::import_from_json(&mut conn, &map_file, Some(&purged_sidecar)) {
-                Ok(stats) => eprintln!(
-                    "DB ready: {} projects, {} purged, {} active in {} ({} new, {} updated this run)",
+            match db::import_from_json_if_empty(&mut conn, &map_file, Some(&purged_sidecar)) {
+                Ok(Some(stats)) => eprintln!(
+                    "DB ready: {} projects, {} purged, {} active in {} ({} new, {} updated from {})",
                     db::count_projects(&conn).unwrap_or(0),
                     db::count_purged(&conn).unwrap_or(0),
                     db::count_active(&conn).unwrap_or(0),
                     db_path.display(),
                     stats.projects_inserted,
                     stats.projects_updated,
+                    map_file.display(),
+                ),
+                Ok(None) => eprintln!(
+                    "DB ready: {} projects, {} purged, {} active in {} (already populated; JSON import skipped)",
+                    db::count_projects(&conn).unwrap_or(0),
+                    db::count_purged(&conn).unwrap_or(0),
+                    db::count_active(&conn).unwrap_or(0),
+                    db_path.display(),
                 ),
                 Err(e) => eprintln!("Warning: db import failed: {}", e),
             }

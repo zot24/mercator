@@ -11,7 +11,7 @@
 //! cheap content hash (FNV-on-Rust-DefaultHasher); status is one of
 //! `synced`, `diverged`, or `no-global`.
 
-use crate::project::{load_map, ProjectType};
+use crate::project::{Project, ProjectType};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 
@@ -228,9 +228,10 @@ pub fn name_prefix_group(name: &str) -> String {
 }
 
 /// Build the grouped skill inventory. Pure-ish (touches the filesystem,
-/// no HTTP/no global state). Wrap in a route handler that calls this and
-/// `Json(...)`s the result.
-pub fn compute_skill_groups(map_file: &Path) -> Vec<SkillGroup> {
+/// no HTTP/no global state). `projects` is the surveyed project list —
+/// the route handler loads it from the DB and `Json(...)`s the result.
+/// Only local kinds (Git / Folder / Idea) are walked for `.claude/skills`.
+pub fn compute_skill_groups(projects: &[Project]) -> Vec<SkillGroup> {
     use std::collections::HashMap;
 
     let home = dirs::home_dir().unwrap_or_default();
@@ -284,7 +285,6 @@ pub fn compute_skill_groups(map_file: &Path) -> Vec<SkillGroup> {
     }
 
     // 3. Project-level skills
-    let projects = load_map(map_file).unwrap_or_default();
     for project in projects.iter() {
         if !matches!(
             project.project_type,
