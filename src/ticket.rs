@@ -285,7 +285,7 @@ fn insert_local_ticket(
     body: &TicketCreate,
     priority: &str,
 ) -> Result<i64, String> {
-    // The `local_tickets` table is created by db::open()'s schema v3
+    // The `local_tickets` table is created by db::open()'s schema v5
     // migration, so the handler can assume it exists.
     let labels_csv = body.labels.as_ref().map(|v| v.join(","));
     conn.execute(

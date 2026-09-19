@@ -18,13 +18,10 @@
 - [~] Deployment status (Vercel, Supabase, Turso) on the same screen as the code — [#8](https://github.com/zot24/mercator/issues/8). **Vercel deploy badges + a GitHub-issues kanban shipped** via a new *enrichment* plug-point (the `Source` trait handles projects; enrichment handles per-project child data). Supabase/Turso still pending.
 - [ ] Smarter graph — semantic edges, not keyword overlap — [#27](https://github.com/zot24/mercator/issues/27)
 - [ ] Mercator export feeds my Obsidian LLM-wiki, maintained by Claude Code — [#22](https://github.com/zot24/mercator/issues/22)
-- [ ] Cost visibility — at minimum dev-time AI spend per project (already in swarm logs) — [#28](https://github.com/zot24/mercator/issues/28)
 
-## Phase 3 — Close the loop
+## Phase 3 — Retired (2026-09-19)
 
-- [ ] Swarm workflow templates (bootstrap MVP, weekly maintenance, idea→implementation) — [#29](https://github.com/zot24/mercator/issues/29)
-- [ ] Trigger workflows directly from Mercator with per-project guardrails — [#30](https://github.com/zot24/mercator/issues/30)
-- [ ] Mercator + wiki + swarm running as one personal AI dev platform — for me first, then everyone else — the umbrella ([#20](https://github.com/zot24/mercator/issues/20) is the cross-project AI piece)
+Phase 3 was "close the loop": workflow templates, per-project guardrails, triggering agents from Mercator, and Mercator + wiki + swarm as one platform. It is retired from this repo. The doing already has a home — an ops tower outside Mercator that dispatches agents into repos, proves results, and records decisions — and building a second loop inside the map would duplicate it. Mercator stays the map. The join between the two is the files Mercator exports (`mercator export`, `active-projects.json`); nothing reads them yet. Closed with this: [#29](https://github.com/zot24/mercator/issues/29), [#30](https://github.com/zot24/mercator/issues/30), the platform umbrella, the cross-project-AI piece ([#20](https://github.com/zot24/mercator/issues/20)), and Phase 2's cost-visibility line ([#28](https://github.com/zot24/mercator/issues/28), which needed swarm job persistence). The Mercator→wiki join ([#22](https://github.com/zot24/mercator/issues/22)) stays in Phase 2.
 
 ## Non-goals (on purpose)
 

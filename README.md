@@ -4,7 +4,7 @@
 
 Mercator is a Rust CLI tool and web dashboard that discovers, organizes, and visualizes all your development projects in one place. It scans local directories, GitHub, GitLab, and an Obsidian vault to build a map of your project landscape.
 
-**Status: v0.1.x — early, single-user, breaking changes likely.** What ships today is local + GitHub + GitLab + Obsidian aggregation backed by SQLite + FTS5, an in-app explorer with file tree and README rendering, auto-tagging, a graph view, a skills inventory, project purge, `mercator list` / `mercator search` / `mercator export` CLI subcommands, and an opt-in Claude Code agent runner. What's described in *Why Mercator?* below as detecting deploy decay or cross-project AI is **roadmap, not yet shipped** — see [docs/STATUS.md](docs/STATUS.md) for the precise live state and the [project board](https://github.com/users/zot24/projects/12) for what's queued.
+**Status: v0.7.5 — single-user, breaking changes still possible.** What ships today is local + GitHub + GitLab + Obsidian aggregation in SQLite + FTS5; an in-app explorer with file tree and README rendering; auto-tagging; four dashboard views (list, blocks, graph, and a read-only GitHub-issues kanban); Vercel deploy badges; a skills inventory; project purge; a "currently working on" active set; the `survey` / `enrich` / `list` / `search` / `export` / `active` / `readme` / `serve` CLI; and an opt-in Claude Code agent runner that is compiled out of default builds. Supabase / Turso status is not built. See [docs/STATUS.md](docs/STATUS.md) for the precise live state and the [project board](https://github.com/users/zot24/projects/12) for what's queued.
 
 ## Why Mercator?
 
@@ -39,10 +39,12 @@ quietly broke. Free tiers creeping toward the limit. Nothing alerts me about
 these today — I find out when something fails. Mercator surfaces them on the
 same screen as everything else, so they're hard to ignore.
 
-**Tells me where to point AI.** Once I trust Mercator's view of my landscape,
-I can ask it — or the agents it launches — questions like *"which project
-could ship this week"* or *"which idea has signal but no code yet."* That's
-the bridge to actually using AI for leverage instead of just for autocomplete.
+**Tells me where to point work.** `mercator list --out-of-sync`, the
+`ROTTING` filter, and the active set answer "what needs me today" from the
+map itself. Mercator does not run the work: dispatching agents, proving
+results, and recording decisions happen in a separate ops loop outside this
+repo. The join between the two is the files Mercator exports; nothing reads
+them yet.
 
 **Doesn't trap my data.** Everything exports to plain markdown. If Mercator
 dies tomorrow, I still walk away with a folder of structured notes on every
@@ -60,24 +62,23 @@ and you're actively trying to ship more — not less. The cognitive overhead of
 keeping track of everything is a real tax on throughput. Mercator pays it for
 you.
 
-### The bigger picture
+### What Mercator is, and is not
 
-Mercator is the **eyes** of a three-part stack I'm building for myself:
+Mercator is the map: one SQLite file plus a dashboard that knows every
+project, where each one was left, and which ones are decaying. Two things
+sit next to it and are not this repo:
 
-- **Mercator** — sees my landscape (this repo)
-- **An LLM-wiki layer** — understands and synthesizes what each project means,
-  where it's going, what's blocking it (lives in my Obsidian vault, fed by
-  Mercator's export)
-- **Swarm** — executes against that understanding under guardrails, using
-  Claude Code as the actual builder
+- **A wiki.** `mercator export` writes one markdown note per project so a
+  knowledge base (Obsidian, an LLM-maintained wiki) can synthesize what each
+  project means and what is blocking it. The join is the exported files
+  ([#22](https://github.com/zot24/mercator/issues/22)).
+- **The doing.** Agents that build, verify, and record decisions run in a
+  separate ops loop. Mercator does not dispatch them, own workflows, or set
+  guardrails; the Phase 3 that once planned that here is retired
+  ([GOALS.md](GOALS.md)).
 
-Each piece is useful alone. Together they're a personal AI dev platform — the
-thing I keep seeing people cobble together out of half a dozen ChatGPT tabs
-and abandoned Notion pages, except this one stays maintained because the
-maintenance cost is near zero.
-
-But you don't need to buy the long thesis to use Mercator. It earns its place
-the day it makes your existing project sprawl manageable.
+Mercator earns its place the day it makes your existing project sprawl
+manageable. It does not need the wiki or the loop to do that.
 
 ## What ships today
 
@@ -98,18 +99,22 @@ the day it makes your existing project sprawl manageable.
 - Pluggable enrichment trait (#8) — per-project child data. **GitHub issues** power a read-only **kanban** view; **Vercel deploy status** shows as badges on every project. Adding a backend (Supabase/Turso next) is one struct + one `impl Enrichment` + one table
 
 **CLI access**
-- `mercator list [--type T] [--tag T] [--tech T]` — filter projects, tab-separated stdout for piping to `awk`/`cut`/`grep`
+- `mercator list [--type T] [--tag T] [--tech T] [--active] [--no-git] [--no-remote] [--out-of-sync] [--format text|json]` — filter projects; an aligned table on a terminal, tab-separated rows when piped
 - `mercator search <query>` — full-text search via SQLite FTS5 (name + description + tags), AND across whitespace tokens, hyphens-in-words are literal
 - `mercator export <out_dir>` — one markdown file per project, suitable for an Obsidian wiki or any other consumer
+- `mercator active add|remove|list|export` — the "currently working on" set, mirrored to `active-projects.json` for session-loaders
+- `mercator enrich` — pull GitHub issues and Vercel deploy status for the surveyed projects without re-surveying
+- `mercator readme` — render the active set as a Markdown block and splice it into a profile README
 
 **Organisation**
 - Auto-tagging into 15 categories (`ai`, `web`, `api`, `cli`, `devops`, `mobile`, `data`, `blockchain`, `seo`, `auth`, `bot`, `automation`, `game`, `docs`, `finance`)
 - Favorites (per-browser, persisted in `localStorage`)
-- Purge — remove a project from the map; persisted in `mercator_purged.json` so future surveys keep it gone
+- Purge — remove a project from the map; persisted in the `purged` table so future surveys keep it gone (`mercator_purged.json` is read only during the one-time first-run import)
 - Smarter description extraction — reads `IDEA.md` → `README.md` → `CLAUDE.md` → `AGENTS.md`, strips frontmatter / badges / callouts, joins the first prose paragraph
 
 **Visualisation**
-- Three views: list, blocks (tile grid), graph (D3 force-directed)
+- Four views: list, blocks (tile grid), graph (D3 force-directed), and a read-only KANBAN of GitHub issues (lanes from issue state + a `status:` label convention)
+- Vercel deploy badges on rows and tiles; a per-project ISSUES tab in the explorer
 - Graph edges from name-mention, shared keywords, shared tags, and idea-↔-implementation links
 - Sidebar filters: type, dirty, stale (≥21 days idle), rotting (stale + dirty), favorites, dynamic categories
 - Real-time search, sort by name or last modified
@@ -128,10 +133,10 @@ the day it makes your existing project sprawl manageable.
 - Detects drift between project copies and the global copy via content hash (synced / diverged / no-global)
 - Repo links surfaced from `known_marketplaces.json` and from `repository:` in skill frontmatter
 
-**Agent runner** (opt-in, requires the `swarm` feature flag and a local `../swarm` checkout)
+**Agent runner** (opt-in, requires the `swarm` feature flag and a local `../swarm` checkout; not in any release)
 - Launch a Claude Code task per project with prompt + model + permission mode + budget
 - Live job list with cost / tool-call / token counters
-- See [issue #21](https://github.com/zot24/mercator/issues/21) for the long-term distribution plan
+- Default builds compile it out. The dashboard still draws the RUN / LAUNCH / AGENTS controls, and those routes answer 404 without the feature ([#21](https://github.com/zot24/mercator/issues/21) tracks that gap; no distribution of `swarm` is planned)
 
 ## Install
 
@@ -188,6 +193,7 @@ mercator survey ~/code --gitlab myuser                    # + GitLab repos
 mercator survey ~/code --github zot24 --max-repos 1000    # Cap fetched repos
 mercator survey ~/code --github zot24 -w 5                # Re-scan every 5 minutes
 mercator survey ~/code -d ~/.mercator/main.db             # Custom DB path
+mercator survey ~/code --obsidian ~/Desktop/brain         # + Obsidian vault (Projects/ folder)
 ```
 
 | Flag | Description |
@@ -198,26 +204,40 @@ mercator survey ~/code -d ~/.mercator/main.db             # Custom DB path
 | `--gitlab-token <token>` | GitLab PAT (also reads `GITLAB_TOKEN` env) |
 | `--max-repos <n>` | Cap the number of repos fetched per remote source (default: no cap, paginates until done) |
 | `-o, --output <file>` | Output JSON snapshot (default: `mercator_map.json`). Snapshot only — the DB is the source of truth. |
-| `-d, --db <file>` | SQLite DB file (default: `mercator.db`). Created if missing; migrated to schema v2 on first open. |
+| `-d, --db <file>` | SQLite DB file (default: `mercator.db`). Created if missing; migrated to schema v6 on first open. |
 | `-w, --watch <minutes>` | Re-scan every N minutes (keeps running) |
+| `--obsidian <vault>` | Also scan an Obsidian vault: subfolders and notes under its projects folder become `Obsidian` projects, linked to repos by name |
+| `--obsidian-folder <name>` | Projects folder inside the vault (default: `Projects`) |
+| `--obsidian-vault <name>` | Vault name used in `obsidian://` URIs (default: the vault directory's name) |
+| `--obsidian-sync` | Run `ob sync` (obsidian-headless) before scanning, for Docker/remote setups |
 
 ### `mercator list`
 
-Filter projects by type, tag, or tech-stack entry. Output is one project per line, tab-separated columns (type, path, name, tags, tech) — designed to pipe to `awk`/`cut`/`grep`.
+Filter projects by type, tag, tech-stack entry, or attention state. On a terminal the output is an aligned, lightly coloured table (`TYPE / NAME / SYNC / TECH / PATH`, `NO_COLOR` respected); when piped it is one project per line, tab-separated columns (type, path, name, tags, tech) — designed for `awk`/`cut`/`grep`. All filters AND together.
 
 ```bash
 mercator list                          # all projects
 mercator list --type Git               # only Git-classified
 mercator list --tech Rust              # projects whose tech-stack contains "Rust"
 mercator list --tag cli --tech Rust    # AND across filters
+mercator list --active                 # only the "currently working on" set
+mercator list --no-git                 # Folder / Idea: directories not under version control
+mercator list --no-remote              # nothing pushed anywhere (no origin)
+mercator list --out-of-sync            # branch ahead and/or behind its upstream (as of last fetch)
+mercator list --format json | jq '.[].name'
 ```
 
 | Flag | Description |
 |------|-------------|
 | `-d, --db <file>` | SQLite DB file (default: `mercator.db`) |
 | `-t, --type <type>` | Filter by project type (`Git`, `Folder`, `Idea`, `GitHub`, `GitLab`, `Obsidian`) |
-| `--tag <tag>` | Filter by exact tag |
+| `--tag <tag>` | Filter by exact tag (case-sensitive) |
 | `--tech <tech>` | Filter by tech-stack entry |
+| `--active` | Only projects on the active list (see `mercator active`) |
+| `--no-git` | Only projects that are not git repositories (`Folder` / `Idea`) |
+| `--no-remote` | Only projects with no git remote configured (plain folders and remote-less repos) |
+| `--out-of-sync` | Only git projects whose branch is ahead and/or behind its upstream. `survey` does not fetch, so this reflects the last fetch |
+| `--format <text\|json>` | `text` (default): table on a TTY, tab-separated rows when piped. `json`: full project records, the `/api/map` shape |
 
 ### `mercator search <query>`
 
@@ -233,6 +253,7 @@ mercator search 'rust web'             # AND across both tokens
 |------|-------------|
 | `<query>` | FTS5 query (positional, required) |
 | `-d, --db <file>` | SQLite DB file (default: `mercator.db`) |
+| `--format <text\|json>` | `text` (default, tab-separated) or `json` (full project records, the `/api/map` shape) |
 
 ### `mercator export <out_dir>`
 
@@ -255,25 +276,73 @@ Each note has YAML frontmatter (`name`, `type`, `path`, `branch`, `status`, `las
 | `--obsidian-vault <path>` | Write under `<vault>/<folder>/` instead of `out_dir` |
 | `--obsidian-folder <name>` | Subdirectory inside the vault (default: `Projects`) |
 
-### `mercator serve`
+### `mercator active <add|remove|list|export>`
 
-Start the web dashboard. All `/api/*` endpoints read and write the SQLite DB; the JSON file is consulted only as a fallback if a DB read errors.
+Manage the "currently working on" set. It is orthogonal to surveyed state: it survives re-surveys, and a path can be activated before it is surveyed. Every mutation rewrites `active-projects.json` next to the DB so a session-loader (Hermes, or any agent) can pick up the current focus without opening the DB.
 
-#### Optional: token config
-
-The dashboard's refresh button can fetch GitHub/GitLab if you drop a config file at `~/.config/mercator/config.toml`:
-
-```toml
-[github]
-user = "zot24"
-token = "ghp_xxxxx"   # optional — public repos work without it (60/hr cap)
-
-[gitlab]
-user = "zot24"
-token = "glpat-xxxxx" # optional
+```bash
+mercator active add ~/code/mercator --note "shipping the docs sweep"
+mercator active list                     # tab-separated: path, activated_at, note; most recent first
+mercator active list --format json       # joins in description / type / tech / tags when surveyed
+mercator active remove ~/code/mercator
+mercator active export                   # rewrite active-projects.json after a re-survey
+mercator list --active                   # the project list filtered to the active set
 ```
 
-The file is read once at `mercator serve` startup and stored in memory; chmod 0600 is applied automatically when the binary writes it (the read path doesn't enforce the mode but it's recommended). Tokens never leave the server — `GET /api/settings` returns a redacted shape (`{github_user, github_token_set, gitlab_user, gitlab_token_set}`) for the dashboard's "you have a token configured" hint.
+| Flag | Description |
+|------|-------------|
+| `add <path> [-n, --note <text>]` | Mark a path active. Re-adding refreshes the timestamp and replaces the note |
+| `remove <path>` | Drop a path from the set (no-op with a warning if it is not there) |
+| `list [--format text\|json]` | Print the set; `json` joins in project metadata when the path is surveyed |
+| `export` | Rewrite the JSON snapshot from the current DB state without changing the set |
+| `-d, --db <file>` | SQLite DB file (default: `mercator.db`) |
+| `--export <path>` | Where the snapshot is written (default: `active-projects.json` next to the DB). `-` or any path containing `/dev/null` suppresses it |
+
+### `mercator enrich`
+
+Attach per-project child data to the projects already in the DB without re-surveying: GitHub issues (the dashboard's KANBAN view and the explorer's ISSUES tab) and the latest Vercel deployment per project (deploy badges). A provider runs only when its token is configured. `survey` and the dashboard's refresh button run the same providers automatically after upserting projects.
+
+```bash
+mercator enrich --github-token ghp_xxx                 # issues for every repo the token can push to
+mercator enrich --github-token ghp_xxx --owned-only    # only repos you own/administer
+GITHUB_TOKEN=$(gh auth token) mercator enrich          # same via env; Vercel needs config.toml
+```
+
+| Flag | Description |
+|------|-------------|
+| `--github-token <token>` | GitHub PAT (falls back to `GITHUB_TOKEN`, then `[github] token` in `config.toml`). Repos are pre-checked for push access and enabled issues |
+| `--owned-only` | Only ingest issues from repos you own/administer, dropping push-only collaborations. Overrides `[github] owned_only` |
+| `-d, --db <file>` | SQLite DB file (default: `mercator.db`) |
+
+Issues land in `github_issues` / `github_remotes` and deployments in `vercel_deployments`, keyed by the project's git remote; each provider records its last run in `enrichment_state`. Vercel has no CLI flag: set `[vercel] token` (and `user` to a team id for team accounts) in `~/.config/mercator/config.toml`.
+
+### `mercator readme`
+
+Render a Markdown "projects" section (the active set by default) for a profile README, and optionally splice it into a file between `<!-- MERCATOR:START -->` / `<!-- MERCATOR:END -->` markers. Everything outside the markers is left alone; without `--inject` the block is printed to stdout.
+
+```bash
+mercator readme                                   # table to stdout
+mercator readme --inject ~/me/README.md           # update in place (markers appended if absent)
+mercator readme --all --limit 10 --no-badge       # every project, capped, no footer
+mercator readme --list --public-only --title "🚀 Currently Building" --inject README.md
+```
+
+| Flag | Description |
+|------|-------------|
+| `--inject <file>` | Update this file in place; a missing file is created |
+| `--all` | Every project instead of just the active set |
+| `-t, --type`, `--tag`, `--tech` | The same filters as `mercator list` |
+| `--limit <n>` | Cap the number of projects rendered |
+| `--title <text>` | Section heading (default: `🛠️ What I'm working on`) |
+| `--no-badge` | Omit the "mapped by mercator" footer |
+| `--public-only` | Keep only verifiably public repos. Uses the GitHub API when `GITHUB_TOKEN` is set, else an unauthenticated web check; private, remote-less, and unverifiable repos are dropped. Needs network |
+| `--list` | Bullet list (`- <emoji> **[name](url)** — description`) instead of a table |
+| `--no-emoji` | In list layout, omit the per-project tech emoji |
+| `-d, --db <file>` | SQLite DB file (default: `mercator.db`) |
+
+### `mercator serve`
+
+Start the web dashboard. Every `/api/*` endpoint reads and writes the SQLite DB, including `/api/skills`. On start, `serve` imports `mercator_map.json` into the DB **only if the `projects` table is empty** (the first-run upgrade path); a populated DB is never overwritten by the snapshot. After that the JSON is read only as a fallback if a DB read errors.
 
 ```bash
 mercator serve                          # http://127.0.0.1:3000
@@ -287,11 +356,33 @@ mercator serve --refresh ~/code         # Refresh button re-scans this path in-p
 |------|-------------|
 | `-p, --port <port>` | Port to listen on (default: 3000) |
 | `-b, --bind <ip>` | Bind address (default: 127.0.0.1) |
-| `-m, --map-file <file>` | Legacy JSON snapshot path (default: `mercator_map.json`) — used only as a fallback if the DB read fails. |
+| `-m, --map-file <file>` | Legacy JSON snapshot path (default: `mercator_map.json`). Imported into the DB only when the DB has no projects (first run); otherwise read only as a fallback if a DB read fails. |
 | `-d, --db <file>` | SQLite DB file (default: `mercator.db`). Source of truth for every read and write. |
 | `--refresh <path>` | Local path the dashboard's refresh button re-scans. Repeat for multiple roots: `serve --refresh ~/code --refresh ~/oss`. Without this, the refresh button just reloads the page. |
 
-Without `--refresh`, the dashboard sees new projects only after a fresh `mercator survey ...`. With `--refresh`, the in-dashboard refresh button re-scans and upserts directly into the live DB — faster for ad-hoc local changes. Remote sources (GitHub/GitLab/Obsidian) are not re-fetched on refresh; use `mercator survey ...` for those.
+Without `--refresh`, the dashboard sees new projects only after a fresh `mercator survey ...`. With `--refresh`, the in-dashboard refresh button re-scans those paths and upserts directly into the live DB — faster for ad-hoc local changes. In the same request it re-fetches GitHub / GitLab when `config.toml` names a user, and then runs enrichment (issues, Vercel deploys) when the tokens are configured. The Obsidian vault is not re-scanned on refresh; use `mercator survey --obsidian ...` for that.
+
+#### Optional: token config
+
+The dashboard's refresh button can fetch GitHub/GitLab, and `survey` / `enrich` / refresh can pull issues and Vercel deploy status, if you drop a config file at `~/.config/mercator/config.toml`:
+
+```toml
+[github]
+user = "zot24"
+token = "ghp_xxxxx"          # optional — public repos work without it (60/hr cap)
+owned_only = true            # optional — issues only from repos you own/administer
+owners = ["zot24", "motty"]  # optional — restrict issue ingestion to these owners
+
+[gitlab]
+user = "zot24"
+token = "glpat-xxxxx"        # optional
+
+[vercel]
+token = "vercel_xxxxx"       # deploy-status badges
+user = "team_xxxxx"          # optional teamId for team-scoped accounts
+```
+
+The file is read once at `mercator serve` startup and stored in memory; chmod 0600 is applied automatically when the binary writes it (the read path doesn't enforce the mode but it's recommended). Tokens never leave the server — `GET /api/settings` returns a redacted shape (`{github_user, github_token_set, gitlab_user, gitlab_token_set, vercel_team, vercel_token_set}`) for the dashboard's "you have a token configured" hint. The dashboard's settings panel can set only the GitHub and GitLab user and token (`POST /api/settings`); the `[vercel]` block and the `owned_only` / `owners` keys are edited in the file.
 
 ## Docker
 
@@ -346,7 +437,7 @@ The promises in *Why Mercator?* that don't ship today live as tracked issues. Th
 - **"Stops me from losing projects"** — local + GitHub + GitLab + Obsidian work; **GitHub issues (kanban) and Vercel deploy status now land via the enrichment plug-point** ([#8](https://github.com/zot24/mercator/issues/8)); Supabase / Turso are next on the same seam
 - **"Cuts the context-switch tax"** — file-tree explorer ships with smart auto-open: dirty repos open the most-recently-modified uncommitted file; clean repos open the freshest file under `src/`/`app/`/`lib/`; README is the fallback. Header banner shows branch, last commit, and days-since-modified.
 - **"Catches silent decay"** — dirty repos and stale (≥21 days idle) surface today, plus a `ROTTING` filter for the rare project that's both. Failed/ERROR Vercel deploys now surface as red badges ([#8](https://github.com/zot24/mercator/issues/8)); Supabase/Turso quota decay is still pending
-- **"Tells me where to point AI"** — single-project agent launch works (with `--features swarm`); **cross-project landscape questioning** is [#20](https://github.com/zot24/mercator/issues/20)
+- **"Tells me where to point work"** — `list --out-of-sync` / `--active` / `--no-remote` and the `ROTTING` filter answer it from the map. Cross-project AI questioning ([#20](https://github.com/zot24/mercator/issues/20)) and the in-Mercator workflow loop are retired from this repo; see [GOALS.md](GOALS.md)
 - **"Doesn't trap my data"** — `mercator export` writes one markdown file per project with frontmatter + body; `--obsidian-vault` mode targets the Obsidian wiki layer.
 
 Everything else is in the [project board](https://github.com/users/zot24/projects/12), grouped by phase.
@@ -364,6 +455,7 @@ Everything else is in the [project board](https://github.com/users/zot24/project
 ## Documentation map
 
 - **[docs/STATUS.md](docs/STATUS.md)** — current state, what just shipped, where things are heading.
-- **[GOALS.md](GOALS.md)** — long-term direction (Phase 1/2/3).
+- **[GOALS.md](GOALS.md)** — long-term direction (Phase 1 shipped, Phase 2 open, Phase 3 retired).
 - **[CLAUDE.md](CLAUDE.md)** — operator's manual for picking up the codebase.
 - **[docs/decisions/](docs/decisions/)** — ADRs for non-obvious design decisions.
+- **[docs/TICKET_CONTRACT.md](docs/TICKET_CONTRACT.md)** — the `POST /api/tickets` contract (partly implemented: creation only, nothing reads `local_tickets` back yet).
