@@ -512,11 +512,12 @@
 
             <div class="text-[11px] leading-relaxed text-on-surface-variant space-y-3">
                 <div>
-                    <strong class="text-on-surface mono">Three views</strong> — top toolbar buttons:
+                    <strong class="text-on-surface mono">Four views</strong> — top toolbar buttons:
                     <ul class="list-disc list-inside mt-1 space-y-0.5 ml-2">
-                        <li><strong>LIST</strong> — dense, scannable. Best for "find this project."</li>
+                        <li><strong>LIST</strong> — dense, scannable. Best for "find this project." Vercel deploy badges (▲ READY / ERROR / …) appear here and in BLOCKS once <code>mercator enrich</code> has run.</li>
                         <li><strong>BLOCKS</strong> — tile grid. Best for visual scanning.</li>
                         <li><strong>GRAPH</strong> — D3 force-directed view of project relationships (shared tags, name mentions, idea↔implementation links).</li>
+                        <li><strong>KANBAN</strong> — read-only board of your GitHub issues (TODO / IN PROGRESS / DONE from issue state + a <code>status:</code> label), grouped by repo; cards link to GitHub. Empty until <code>mercator enrich</code> or a survey with a GitHub token has run.</li>
                     </ul>
                 </div>
 
@@ -569,7 +570,7 @@ mercator survey ~/code -d ~/.mercator/main.db</pre>
                 <div class="bg-surface-dim border border-outline-variant rounded p-3">
                     <div class="mono text-[11px] font-medium text-primary mb-2">mercator serve</div>
                     <p class="text-[11px] text-on-surface-variant leading-relaxed mb-2">
-                        Starts this dashboard. Reads everything from the DB; the JSON file is consulted only as a fallback if a DB read errors. Pass <code>--refresh &lt;path&gt;</code> to make the in-page refresh button re-scan locally.
+                        Starts this dashboard. Reads everything from the DB. On first start with an empty DB it imports <code>mercator_map.json</code> once; a populated DB is never overwritten, and after that the JSON is only a fallback if a DB read errors. Pass <code>--refresh &lt;path&gt;</code> to make the in-page refresh button re-scan locally.
                     </p>
                     <pre class="mono text-[10px] text-on-surface bg-surface border border-outline-variant rounded p-2 overflow-x-auto">mercator serve
 mercator serve -p 8080
@@ -580,12 +581,15 @@ mercator serve -d ~/.mercator/main.db</pre>
                 <div class="bg-surface-dim border border-outline-variant rounded p-3">
                     <div class="mono text-[11px] font-medium text-primary mb-2">mercator list</div>
                     <p class="text-[11px] text-on-surface-variant leading-relaxed mb-2">
-                        Print projects as tab-separated rows: <code>type \t path \t name \t tags \t tech</code>. Filter by type / tag / tech (combine for AND).
+                        An aligned table on a terminal; tab-separated rows (<code>type \t path \t name \t tags \t tech</code>) when piped. Filter by type / tag / tech, or by attention state; filters AND together. <code>--format json</code> gives full records.
                     </p>
                     <pre class="mono text-[10px] text-on-surface bg-surface border border-outline-variant rounded p-2 overflow-x-auto">mercator list
 mercator list --type Git
 mercator list --tech Rust
-mercator list --tag cli --tech Rust</pre>
+mercator list --tag cli --tech Rust
+mercator list --active            # the "currently working on" set
+mercator list --no-remote         # nothing pushed anywhere
+mercator list --out-of-sync       # ahead/behind upstream (as of last fetch)</pre>
                 </div>
 
                 <div class="bg-surface-dim border border-outline-variant rounded p-3">
@@ -609,6 +613,34 @@ mercator search 'rust web'</pre>
                     <pre class="mono text-[10px] text-on-surface bg-surface border border-outline-variant rounded p-2 overflow-x-auto">mercator export ./notes
 mercator export --obsidian-vault ~/Desktop/brain
 mercator export --obsidian-vault ~/Desktop/brain --obsidian-folder Mercator</pre>
+                </div>
+
+                <div class="bg-surface-dim border border-outline-variant rounded p-3">
+                    <div class="mono text-[11px] font-medium text-primary mb-2">mercator active &lt;add|remove|list|export&gt;</div>
+                    <p class="text-[11px] text-on-surface-variant leading-relaxed mb-2">
+                        The "currently working on" set. Survives re-surveys; every change rewrites <code>active-projects.json</code> next to the DB for session-loaders. Not shown in this dashboard yet — use <code>mercator list --active</code>.
+                    </p>
+                    <pre class="mono text-[10px] text-on-surface bg-surface border border-outline-variant rounded p-2 overflow-x-auto">mercator active add ~/code/mercator --note "shipping X"
+mercator active list --format json
+mercator active remove ~/code/mercator</pre>
+                </div>
+
+                <div class="bg-surface-dim border border-outline-variant rounded p-3">
+                    <div class="mono text-[11px] font-medium text-primary mb-2">mercator enrich</div>
+                    <p class="text-[11px] text-on-surface-variant leading-relaxed mb-2">
+                        Pull GitHub issues (KANBAN view, per-project ISSUES tab) and Vercel deploy status (badges) for the projects already in the DB, without re-surveying. Runs each provider whose token is configured; survey and the refresh button do the same automatically.
+                    </p>
+                    <pre class="mono text-[10px] text-on-surface bg-surface border border-outline-variant rounded p-2 overflow-x-auto">mercator enrich --github-token ghp_xxx
+mercator enrich --github-token ghp_xxx --owned-only</pre>
+                </div>
+
+                <div class="bg-surface-dim border border-outline-variant rounded p-3">
+                    <div class="mono text-[11px] font-medium text-primary mb-2">mercator readme</div>
+                    <p class="text-[11px] text-on-surface-variant leading-relaxed mb-2">
+                        Render the active set (or <code>--all</code>) as a Markdown "projects" block and splice it into a profile README between <code>&lt;!-- MERCATOR:START --&gt;</code> / <code>&lt;!-- MERCATOR:END --&gt;</code> markers.
+                    </p>
+                    <pre class="mono text-[10px] text-on-surface bg-surface border border-outline-variant rounded p-2 overflow-x-auto">mercator readme --inject ~/me/README.md
+mercator readme --list --public-only --title "🚀 Currently Building"</pre>
                 </div>
             </div>
 
@@ -637,7 +669,7 @@ token = "glpat-xxxxx" # optional
 token = "vercel_xxxxx" # deploy-status badges + kanban enrichment (#8)
 user = "team_xxxxx"    # optional teamId for team-scoped accounts
             <p class="text-[11px] leading-relaxed text-on-surface-variant mt-3">
-                You can also edit it from the <button onclick="closeDocsView(); openSettings();" class="text-primary hover:underline">settings panel</button> — tokens never appear in the response from <code>GET /api/settings</code>, only a <code>*_token_set</code> boolean for the "you have a token configured" hint.
+                The GitHub and GitLab user + token can also be set from the <button onclick="closeDocsView(); openSettings();" class="text-primary hover:underline">settings panel</button> — tokens never appear in the response from <code>GET /api/settings</code>, only a <code>*_token_set</code> boolean for the "you have a token configured" hint. The <code>[vercel]</code> block and the <code>owned_only</code> / <code>owners</code> keys cannot be set from the panel: edit the file. The panel's LOCAL PATHS and GITLAB URL fields are stored only in this browser and drive nothing — refresh paths come from <code>mercator serve --refresh</code>.
             </p>
         </section>
 
