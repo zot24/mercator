@@ -1,15 +1,15 @@
-//! SQLite persistence (schema v2) — the source of truth for projects,
-//! tags, tech-stack, obsidian links, the purge blocklist, and the FTS5
-//! search index. Every API endpoint and every CLI subcommand routes
-//! reads and writes through here; the legacy `mercator_map.json` is a
-//! backup snapshot only.
+//! SQLite persistence (schema v6) — the source of truth for projects,
+//! tags, tech-stack, obsidian links, the purge blocklist, the active set,
+//! local tickets, enrichment child data, and the FTS5 search index. Every
+//! API endpoint and every CLI subcommand routes reads and writes through
+//! here; the legacy `mercator_map.json` is a backup snapshot only.
 //!
 //! ## Public surface
 //!
 //! - [`open`] — opens or creates the DB, applies schema v1, then runs
-//!   the v1→v2 migration if needed (creates `projects_fts`, rebuilds
-//!   from existing rows). PRAGMAs: `journal_mode = WAL`,
-//!   `foreign_keys = ON`.
+//!   the v2..v6 migrations in order as `PRAGMA user_version` requires
+//!   (FTS5, active set, ahead/behind, local tickets, enrichment tables).
+//!   PRAGMAs: `journal_mode = WAL`, `foreign_keys = ON`.
 //! - [`import_from_json`] — one-shot migration from the legacy
 //!   `mercator_map.json` + `mercator_purged.json`. Idempotent. Imports
 //!   the blocklist first so a stale snapshot can't re-introduce a

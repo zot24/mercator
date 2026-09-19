@@ -19,7 +19,7 @@ cargo run --release -- serve
 ## Read this first
 
 - **[docs/STATUS.md](docs/STATUS.md)** — current state, what just shipped, where we're heading. The most useful single doc when picking the project up after time away.
-- **[GOALS.md](GOALS.md)** — long-term direction (Phase 1/2/3).
+- **[GOALS.md](GOALS.md)** — long-term direction (Phase 1 shipped, Phase 2 open, Phase 3 retired).
 - **[docs/decisions/](docs/decisions/)** — ADRs for the non-obvious design calls. If you're about to revisit one of these decisions, read the ADR first; it captures alternatives we already weighed.
 - **[Project board](https://github.com/users/zot24/projects/12)** — what's queued.
 
@@ -38,7 +38,7 @@ Providers are enum-dispatched via `AnyEnrichment` exactly like `AnySource` (ADR 
 
 ## Status
 
-v0.1.x. Single-user. Breaking changes are likely. Phase 1 of the [Goals doc](GOALS.md) is essentially complete as of 2026-05-04 — see [docs/STATUS.md](docs/STATUS.md) for the precise picture.
+v0.7.5 (`Cargo.toml`; the Homebrew release of 2026-06-21). `master` carries unreleased work on top of it: the enrichment plug-point (#89) and the serve import guard (#91). Single-user. Breaking changes are still possible. Phase 1 of the [Goals doc](GOALS.md) shipped 2026-05-04 except the dogfood item; Phase 3 is retired — Mercator is the map, the agent loop lives outside this repo. See [docs/STATUS.md](docs/STATUS.md) for the precise picture.
 
 ## Commands
 
@@ -67,7 +67,8 @@ cargo run -- enrich --github-token ghp_xxx
 # Persist as `[github] owned_only = true` (or `owners = [...]`) in config.toml.
 cargo run -- enrich --github-token ghp_xxx --owned-only
 
-# Dashboard (reads from mercator.db; falls back to map.json on DB error)
+# Dashboard (reads from mercator.db; imports map.json only when the DB has no
+# projects, i.e. first run; otherwise map.json is only a fallback on DB error)
 # Views: LIST / BLOCKS / GRAPH / KANBAN (GitHub issues). Vercel deploy
 # badges appear on project rows/cards in LIST + BLOCKS.
 cargo run -- serve --port 3000
@@ -121,12 +122,15 @@ mercator/
 │   ├── vercel.rs         # Vercel deploy-status enrichment provider
 │   ├── markdown.rs       # description extraction, frontmatter, export rendering
 │   ├── tags_graph.rs     # auto-tagging + D3 graph computation
-│   ├── skills.rs         # skills inventory walker
+│   ├── skills.rs         # skills inventory walker (project list from the DB)
 │   ├── config.rs         # ~/.config/mercator/config.toml (GitHub/GitLab/Vercel tokens)
+│   ├── readme.rs         # `mercator readme`: render the active set + splice between markers
+│   ├── ticket.rs         # POST /api/tickets: local_tickets insert or GitHub issue create
 │   └── agent.rs          # swarm-feature agent runner (cfg-gated)
-├── dist/index.html       # single-file dashboard (~2.2k lines); LIST/BLOCKS/GRAPH/KANBAN views
+├── dist/index.html       # single-file dashboard (~2.4k lines); LIST/BLOCKS/GRAPH/KANBAN views
 ├── docs/
 │   ├── STATUS.md         # current state + roadmap
+│   ├── TICKET_CONTRACT.md # POST /api/tickets contract (creation implemented; consumers not)
 │   └── decisions/        # ADRs
 ├── .github/workflows/ci.yml
 ├── Cargo.toml            # `swarm` feature flag (path-dep added manually)
@@ -158,7 +162,7 @@ cargo fmt
 # Lint (CI runs this with -D warnings)
 cargo clippy --all-targets --no-deps -- -D warnings
 
-# Test (97 tests as of 2026-05-04)
+# Test (174 tests as of 2026-09-19)
 cargo test
 
 # Local-only: enable the in-dashboard agent runner
@@ -189,7 +193,7 @@ All three must be green before merge.
 
 ## Adding a module
 
-`main.rs` was a 3604-line monolith before [#11](https://github.com/zot24/mercator/issues/11) split it. The split landed in waves; the structure now is the seven modules above. Don't grow `main.rs`. New domains belong in their own module — model the existing ones (`project.rs`, `sources.rs`, `db.rs`) for the convention:
+`main.rs` was a 3604-line monolith before [#11](https://github.com/zot24/mercator/issues/11) split it. The split landed in waves; the structure now is the fourteen modules above. Don't grow `main.rs`. New domains belong in their own module — model the existing ones (`project.rs`, `sources.rs`, `db.rs`) for the convention:
 
 - One `//!` docstring at the top explaining what the module owns and what it doesn't.
 - `pub` only what's needed across module boundaries.
@@ -199,10 +203,12 @@ All three must be green before merge.
 
 1. **`Cargo.toml` has no `swarm` dep declared by default.** Feature `swarm` is just a flag — adding `--features swarm` without manually adding the path dep will fail to build. Intentional until [#21](https://github.com/zot24/mercator/issues/21) lands.
 2. **`SourceError` (for the `Source` trait) still has only `Generic(String)`.** The structured Network/Api/Parse split #8 called for landed in the new **`EnrichmentError`** (`enrichment.rs`) instead — the enrichment providers discriminate; the legacy source fetchers still `eprintln!`. Aligning `SourceError` to the same taxonomy is a follow-up.
-3. ~~Settings panel UI writes tokens to localStorage~~ — **closed by [#2](https://github.com/zot24/mercator/issues/2)**. Tokens now live in `~/.config/mercator/config.toml` (mode 0600); the dashboard's settings panel reads `GET /api/settings` for the redacted shape and writes via `POST /api/settings`. Legacy `mercator-settings` localStorage rows are migrated on first settings open.
+3. ~~Settings panel UI writes tokens to localStorage~~ — **closed by [#2](https://github.com/zot24/mercator/issues/2)**. Tokens now live in `~/.config/mercator/config.toml` (mode 0600); the dashboard's settings panel reads `GET /api/settings` for the redacted shape and writes via `POST /api/settings`. Legacy `mercator-settings` localStorage rows are migrated on first settings open. Still dead: the LOCAL PATHS and GITLAB URL fields, which write only to `localStorage` and drive nothing (refresh paths come from `serve --refresh`); and the `[vercel]` block, which `POST /api/settings` does not accept — edit the file.
 4. **`osascript` Terminal launcher is macOS-only**. Closed as wontfix-for-now ([#17](https://github.com/zot24/mercator/issues/17)).
 5. **Dashboard runs at `127.0.0.1` by default; Docker too**. Expose with `-b 0.0.0.0` *and* `MERCATOR_TOKEN`.
-6. **`agent_jobs` table is not in the schema yet.** Swarm-feature agent runner keeps state in process memory; restart loses the job list. Stage 5 of the SQLite work, not yet scheduled.
+6. **`agent_jobs` table is not in the schema.** Swarm-feature agent runner keeps state in process memory; restart loses the job list. Not scheduled: Phase 3 is retired.
+7. **The dashboard draws RUN / LAUNCH / AGENTS in every build**, but `/api/agent/*` exists only with `--features swarm`; default builds answer 404.
+8. **`mercator serve` writes the DB once.** On start it imports `mercator_map.json` only when `projects` is empty (`db::import_from_json_if_empty`); a populated DB is never overwritten. `survey` still writes the JSON and runs its own import.
 
 ## Why Rust / Axum / SQLite
 
@@ -213,4 +219,4 @@ All three must be green before merge.
 
 ---
 
-*Last updated: 2026-07-08 — the **enrichment plug-point** landed the first slice of #8: an `Enrichment` trait + `AnyEnrichment` dispatch (`enrichment.rs`) for per-project child data, with two providers — GitHub issues (`github.rs`) feeding a read-only KANBAN view, and Vercel deploy status (`vercel.rs`) feeding deploy badges. New schema v6 tables (`github_issues`, `github_remotes`, `vercel_deployments`, `enrichment_state`), endpoints `/api/issues` + `/api/deployments`, a `[vercel]` config block, and a `mercator enrich` command. Previous: 2026-06-19 — TTY-aware `mercator list` table + `--no-git`/`--no-remote`/`--out-of-sync` filters (schema v4 ahead/behind counts). See [docs/STATUS.md](docs/STATUS.md) for the live snapshot.*
+*Last updated: 2026-09-19 — the **honest docs sweep** (#92): README, STATUS and this file diffed against `--help`, the route list and `src/db.rs` (schema v6); Phase 3 retired from GOALS; #90/#91 made `serve`'s JSON import first-run-only and pointed `/api/skills` at the DB. Previous: 2026-07-08 — the **enrichment plug-point** landed the first slice of #8: an `Enrichment` trait + `AnyEnrichment` dispatch (`enrichment.rs`) for per-project child data, with two providers — GitHub issues (`github.rs`) feeding a read-only KANBAN view, and Vercel deploy status (`vercel.rs`) feeding deploy badges. New schema v6 tables (`github_issues`, `github_remotes`, `vercel_deployments`, `enrichment_state`), endpoints `/api/issues` + `/api/deployments`, a `[vercel]` config block, and a `mercator enrich` command. Previous: 2026-06-19 — TTY-aware `mercator list` table + `--no-git`/`--no-remote`/`--out-of-sync` filters (schema v4 ahead/behind counts). See [docs/STATUS.md](docs/STATUS.md) for the live snapshot.*
