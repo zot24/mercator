@@ -1,0 +1,35 @@
+.{
+    .id = "dev.mercator.desktop",
+    .name = "mercator",
+    .display_name = "Mercator",
+    .description = "Starts Mercator and shows the local dashboard.",
+    .version = "0.1.0",
+    .icons = .{"assets/icon.png"},
+    .platforms = .{"macos"},
+    .permissions = .{ "view", "command" },
+    .capabilities = .{ "native_views", "gpu_surfaces", "webview" },
+    .shell = .{
+        .windows = .{
+            .{
+                .label = "main",
+                .title = "Mercator",
+                .width = 1200,
+                .height = 800,
+                .restore_state = false,
+                .restore_policy = "center_on_primary",
+                .views = .{
+                    .{ .label = "main-canvas", .kind = "gpu_surface", .fill = true, .role = "Mercator", .accessibility_label = "Mercator", .gpu_backend = "metal", .gpu_pixel_format = "bgra8_unorm", .gpu_present_mode = "timer", .gpu_alpha_mode = "opaque", .gpu_color_space = "srgb", .gpu_vsync = true },
+                    .{ .label = "dashboard", .kind = "webview", .parent = "main-canvas", .url = "http://127.0.0.1:3000/", .x = 0, .y = 0, .width = 1, .height = 1 },
+                },
+            },
+        },
+    },
+    .security = .{
+        .navigation = .{
+            .allowed_origins = .{ "zero://app", "zero://inline", "http://127.0.0.1:3000" },
+            .external_links = .{ .action = "deny" },
+        },
+    },
+    .web_engine = "system",
+    .cef = .{ .dir = "third_party/cef/macos", .auto_install = false },
+}

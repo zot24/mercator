@@ -1,0 +1,11 @@
+<column grow="1">
+  <if test="{showStatus}">
+    <column grow="1" padding="24" gap="12">
+      <text size="heading">{statusTitle}</text>
+      <text wrap="true">{statusDetail}</text>
+    </column>
+  </if>
+  <else>
+    <panel grow="1" label="dashboard-pane"></panel>
+  </else>
+</column>
