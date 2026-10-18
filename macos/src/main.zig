@@ -19,16 +19,15 @@ const spawn_key: u64 = 1;
 const poll_key: u64 = 2;
 const timer_key: u64 = 3;
 const poll_ms: u32 = 200;
-// The listen line is printed before the socket bind. Wait past a failed
-// bind before the first probe, so a process already on port 3000 cannot
-// answer /api/map for this app.
+// The listen line is printed before the socket bind.
 const settle_ms: i64 = 300;
+const stable_ready_ms: i64 = 500;
 const listen_hint = "Mercator map available";
 
 pub const dashboard_origin = "http://127.0.0.1:3000";
 pub const dashboard_url = "http://127.0.0.1:3000/";
 pub const map_url = "http://127.0.0.1:3000/api/map";
-pub const serve_argv_len = 10;
+pub const serve_argv_len = 12;
 
 const blank_url = "zero://inline";
 const allowed_origins = [_][]const u8{
@@ -107,6 +106,10 @@ pub const Model = struct {
         "announced_ms",
         "poll_in_flight",
         "reload_token",
+        "map_path",
+        "map_path_len",
+        "ready_ms",
+        "restarts_used",
     };
 
     server: Server = .stopped,
@@ -116,12 +119,16 @@ pub const Model = struct {
     static_dir_len: usize = 0,
     db_path: [std.fs.max_path_bytes]u8 = undefined,
     db_path_len: usize = 0,
+    map_path: [std.fs.max_path_bytes]u8 = undefined,
+    map_path_len: usize = 0,
     detail: [1024]u8 = undefined,
     detail_len: usize = 0,
     announced: bool = false,
     announced_ms: i64 = 0,
     poll_in_flight: bool = false,
     reload_token: u64 = 0,
+    ready_ms: ?i64 = null,
+    restarts_used: u8 = 0,
 
     pub fn showStatus(self: *const Model) bool {
         return self.server != .ready;
@@ -156,6 +163,7 @@ pub fn serveArgv(
     binary: []const u8,
     static_dir: []const u8,
     db_path: []const u8,
+    map_path: []const u8,
 ) []const []const u8 {
     out.* = .{
         binary,
@@ -164,6 +172,8 @@ pub fn serveArgv(
         static_dir,
         "--db",
         db_path,
+        "--map-file",
+        map_path,
         "--bind",
         "127.0.0.1",
         "--port",
@@ -172,15 +182,52 @@ pub fn serveArgv(
     return out;
 }
 
-pub fn bundleIsSpawnable(binary: []const u8, static_dir: []const u8, db_path: []const u8) bool {
+pub fn bundleIsSpawnable(binary: []const u8, static_dir: []const u8, db_path: []const u8, map_path: []const u8) bool {
     return binary.len > 0 and
         std.fs.path.isAbsolute(binary) and
         std.fs.path.isAbsolute(static_dir) and
-        std.fs.path.isAbsolute(db_path);
+        std.fs.path.isAbsolute(db_path) and
+        std.fs.path.isAbsolute(map_path);
 }
 
 pub fn applicationSupportDb(home: []const u8, buf: []u8) error{NoSpaceLeft}![]u8 {
-    return std.fmt.bufPrint(buf, "{s}/Library/Application Support/Mercator/mercator.db", .{home});
+    return applicationSupportChild(home, "mercator.db", buf);
+}
+
+pub fn applicationSupportMap(home: []const u8, buf: []u8) error{NoSpaceLeft}![]u8 {
+    return applicationSupportChild(home, "mercator_map.json", buf);
+}
+
+fn applicationSupportChild(home: []const u8, name: []const u8, buf: []u8) error{NoSpaceLeft}![]u8 {
+    return std.fmt.bufPrint(buf, "{s}/Library/Application Support/Mercator/{s}", .{ home, name });
+}
+
+pub const ExitDecision = struct {
+    server: Server,
+    respawn: bool,
+    restarts_used: u8,
+};
+
+pub fn afterChildExit(
+    server: Server,
+    reason: native_sdk.EffectExitReason,
+    now_ms: i64,
+    ready_ms: ?i64,
+    restarts_used: u8,
+) ExitDecision {
+    switch (reason) {
+        .cancelled, .rejected, .spawn_failed => return .{
+            .server = .exited,
+            .respawn = false,
+            .restarts_used = restarts_used,
+        },
+        .signaled, .exited => {},
+    }
+    const stable = if (ready_ms) |marked| now_ms >= marked + stable_ready_ms else false;
+    if (server == .ready and stable and restarts_used == 0) {
+        return .{ .server = .starting, .respawn = true, .restarts_used = 1 };
+    }
+    return .{ .server = .exited, .respawn = false, .restarts_used = restarts_used };
 }
 
 pub fn packagedBundle(exe: []const u8, binary_buf: []u8, static_buf: []u8) error{NoSpaceLeft}!?Bundle {
@@ -240,29 +287,57 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             const next = nextServer(model.server, response.outcome == .ok, response.status);
             if (next != .ready) return;
             model.server = .ready;
+            model.ready_ms = fx.wallMs();
             model.reload_token += 1;
             fx.cancelTimer(timer_key);
             fx.cancel(poll_key);
         },
         .spawned => |exit| {
             if (model.server == .stopped) return;
+            const decision = afterChildExit(
+                model.server,
+                exit.reason,
+                fx.wallMs(),
+                model.ready_ms,
+                model.restarts_used,
+            );
+            model.restarts_used = decision.restarts_used;
+            fx.cancel(poll_key);
+            model.poll_in_flight = false;
+            if (decision.respawn) {
+                startChild(model, fx);
+                return;
+            }
             noteExit(model, exit);
             fx.cancelTimer(timer_key);
-            fx.cancel(poll_key);
         },
     }
 }
 
 pub fn boot(model: *Model, fx: *Effects) void {
     if (model.server == .exited) return;
-    if (!bundleIsSpawnable(binarySlice(model), staticSlice(model), dbSlice(model))) {
+    if (!bundleIsSpawnable(binarySlice(model), staticSlice(model), dbSlice(model), mapSlice(model))) {
         fail(model, "The Mercator bundle is missing. Run macos/scripts/stage-assets.sh, then start the app again.");
         return;
     }
+    startChild(model, fx);
+}
+
+fn startChild(model: *Model, fx: *Effects) void {
     model.server = .starting;
+    model.announced = false;
+    model.announced_ms = 0;
+    model.ready_ms = null;
+    model.poll_in_flight = false;
     setDetail(model, "Waiting for mercator serve.");
     var storage: [serve_argv_len][]const u8 = undefined;
-    const argv = serveArgv(&storage, binarySlice(model), staticSlice(model), dbSlice(model));
+    const argv = serveArgv(
+        &storage,
+        binarySlice(model),
+        staticSlice(model),
+        dbSlice(model),
+        mapSlice(model),
+    );
     fx.spawn(.{
         .key = spawn_key,
         .argv = argv,
@@ -341,6 +416,10 @@ fn dbSlice(model: *const Model) []const u8 {
     return model.db_path[0..model.db_path_len];
 }
 
+fn mapSlice(model: *const Model) []const u8 {
+    return model.map_path[0..model.map_path_len];
+}
+
 fn prepare(model: *Model, init: std.process.Init) void {
     const home = init.environ_map.get("HOME") orelse {
         fail(model, "HOME is unset, so the database directory cannot be created.");
@@ -351,6 +430,11 @@ fn prepare(model: *Model, init: std.process.Init) void {
         return;
     };
     model.db_path_len = db_path.len;
+    const map_path = applicationSupportMap(home, &model.map_path) catch {
+        fail(model, "The map path does not fit.");
+        return;
+    };
+    model.map_path_len = map_path.len;
     const support = std.fs.path.dirname(db_path) orelse {
         fail(model, "The database path has no directory.");
         return;
@@ -377,7 +461,7 @@ fn prepare(model: *Model, init: std.process.Init) void {
     };
     model.binary_len = located.binary.len;
     model.static_dir_len = located.static_dir.len;
-    if (!bundleIsSpawnable(binarySlice(model), staticSlice(model), dbSlice(model))) {
+    if (!bundleIsSpawnable(binarySlice(model), staticSlice(model), dbSlice(model), mapSlice(model))) {
         fail(model, "The bundled dashboard path is not absolute.");
     }
 }

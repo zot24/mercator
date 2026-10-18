@@ -20,4 +20,4 @@ cd macos
 native dev
 ```
 
-The app listens on `127.0.0.1:3000`. If that port is already taken, the window shows the spawn failure. The other process is left running, and the app does not replace an existing database.
+The app listens on `127.0.0.1:3000`. The database and the map file are `mercator.db` and `mercator_map.json` under `~/Library/Application Support/Mercator`. If that port is already taken, the window shows the spawn failure. The other process is left running, and the app leaves an existing database in place.
