@@ -419,6 +419,11 @@ enum Commands {
         /// re-fetched on refresh — run `mercator survey ...` for those.
         #[arg(long)]
         refresh: Vec<PathBuf>,
+
+        /// Dashboard directory to serve. When this flag is absent, serve
+        /// `dist` from the process working directory.
+        #[arg(long)]
+        static_dir: Option<PathBuf>,
     },
 }
 
@@ -1492,6 +1497,10 @@ fn format_active_row(
     format!("{}\t{}\t{}\t{}", a.activated_at, a.path, name, note)
 }
 
+fn resolve_static_dir(flag: Option<&Path>) -> PathBuf {
+    flag.unwrap_or(Path::new("dist")).to_path_buf()
+}
+
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
@@ -2066,7 +2075,17 @@ async fn main() {
             map_file,
             db: db_path,
             refresh,
+            static_dir,
         } => {
+            let static_dir = resolve_static_dir(static_dir.as_deref());
+            if !static_dir.is_dir() {
+                eprintln!(
+                    "Error: static directory does not exist: {}",
+                    static_dir.display()
+                );
+                std::process::exit(1);
+            }
+
             // Open the DB (creating + applying schema if absent) and import
             // the existing JSON map + purge sidecar so a fresh DB on a
             // long-running install is hydrated immediately. If the DB
@@ -2171,7 +2190,7 @@ async fn main() {
             let app = Router::new()
                 .merge(api)
                 .with_state(app_state)
-                .fallback_service(ServeDir::new("dist"));
+                .fallback_service(ServeDir::new(static_dir));
 
             let addr = SocketAddr::from((bind, port));
 
@@ -3578,5 +3597,16 @@ mod tests {
         assert!(target.exists());
         assert!(!project::tmp_path_for(&target).exists());
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn resolve_static_dir_defaults_to_dist() {
+        assert_eq!(resolve_static_dir(None), PathBuf::from("dist"));
+    }
+
+    #[test]
+    fn resolve_static_dir_uses_the_flag() {
+        let flag = Path::new("/var/lib/mercator/dashboard");
+        assert_eq!(resolve_static_dir(Some(flag)), flag);
     }
 }
